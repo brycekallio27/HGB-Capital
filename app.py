@@ -1,0 +1,257 @@
+import streamlit as st
+from streamlit_gsheets import GSheetsConnection
+import pandas as pd
+import yfinance as yf
+import numpy as np
+import plotly.express as px
+import datetime
+import plotly.graph_objects as go
+from datetime import datetime
+
+# --- PAGE SETUP ---
+st.set_page_config(page_title="Project Photizo", layout="wide")
+st.title("Project Photizo | Investment Engine")
+
+# --- 1. CONNECT TO DATABASE ---
+try:
+    conn = st.connection("gsheets", type=GSheetsConnection)
+except Exception as e:
+    st.error(f"❌ Connection Failed. Check secrets.toml: {e}")
+    st.stop()
+
+# --- 2. SIDEBAR ---
+st.sidebar.header("Operations")
+user = st.sidebar.selectbox("Partner Login", ["Partner A", "Partner B", "Partner C"])
+st.sidebar.success(f"Active Session: {user}")
+
+# --- 3. THE BRAIN: FINANCIAL MODELS & DATA ---
+
+def get_portfolio_performance(df):
+    """Calculates Market Value, P&L, Allocation, and Sector"""
+    if df.empty: return None, 0, 0
+    
+    tickers = df['Ticker'].tolist()
+    if not tickers: return None, 0, 0
+
+    try:
+        data = yf.download(tickers, period="1d", progress=False)['Close']
+        ticker_objects = {t: yf.Ticker(t) for t in tickers}
+    except:
+        return df, 0, 0 
+
+    # Get Price & Sector Data
+    if len(tickers) == 1:
+        t = tickers[0]
+        try:
+            current_price = ticker_objects[t].info.get('currentPrice', 0)
+            sector = ticker_objects[t].info.get('sector', 'Unknown')
+        except:
+            current_price = 0
+            sector = 'Unknown'
+        df['Current Price'] = current_price
+        df['Sector'] = sector
+    else:
+        # Multiple Tickers
+        current_prices = data.iloc[-1]
+        df['Current Price'] = df['Ticker'].map(current_prices)
+        # Fetch sectors one by one (yfinance doesn't do bulk sector fetch easily)
+        df['Sector'] = df['Ticker'].apply(lambda t: ticker_objects[t].info.get('sector', 'Unknown'))
+
+    # Metrics
+    df['Market Value'] = df['Shares'] * df['Current Price']
+    if 'Cost' not in df.columns: df['Cost'] = 0 
+    df['Total Cost'] = df['Shares'] * df['Cost']
+    df['Unrealized Gain ($)'] = df['Market Value'] - df['Total Cost']
+    df['Return (%)'] = df.apply(lambda x: ((x['Market Value'] - x['Total Cost']) / x['Total Cost'] * 100) if x['Total Cost'] > 0 else 0, axis=1)
+    
+    total_equity = df['Market Value'].sum()
+    total_pl = df['Unrealized Gain ($)'].sum()
+    
+    return df, total_equity, total_pl
+
+def get_financial_data(ticker):
+    """Fetches data for DCF + History Charts + News"""
+    try:
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        cashflow = stock.cashflow
+        
+        if cashflow.empty: return None
+        try:
+            fcf = cashflow.loc['Free Cash Flow'].iloc[0]
+        except:
+            try:
+                ocf = cashflow.loc['Operating Cash Flow'].iloc[0]
+                capex = cashflow.loc['Capital Expenditure'].iloc[0]
+                fcf = ocf + capex
+            except: fcf = 0
+        
+        analyst_growth = info.get('earningsGrowth', 0.10)
+        if analyst_growth is None: analyst_growth = 0.08
+        if analyst_growth > 0.20: analyst_growth = 0.20 
+        if analyst_growth < 0: analyst_growth = 0.02 
+        
+        # History for charts
+        fin = stock.financials
+        history = pd.DataFrame()
+        if not fin.empty:
+            transposed = fin.T.sort_index(ascending=True)
+            if 'Total Revenue' in transposed.columns and 'Net Income' in transposed.columns:
+                history['Revenue ($B)'] = transposed['Total Revenue'] / 1e9
+                history['Net Income ($B)'] = transposed['Net Income'] / 1e9
+                history.index = history.index.strftime('%Y')
+
+        news = []
+        try:
+            news = stock.news[:3]
+        except:
+            pass
+
+        return {
+            "Price": info.get('currentPrice', 0),
+            "Shares": info.get('sharesOutstanding', 0),
+            "Beta": info.get('beta', 1.0),
+            "FCF": fcf,
+            "Analyst_Growth": analyst_growth,
+            "Name": info.get('shortName', ticker),
+            "History": history,
+            "News": news
+        }
+    except: return None
+
+def scan_market_opportunities():
+    watchlist_titans = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "JPM", "V", "JNJ", "PFE", "KO", "PEP", "XOM", "CVX"]
+    opportunities = []
+    for ticker in watchlist_titans:
+        try:
+            t = yf.Ticker(ticker)
+            info = t.info
+            current = info.get('currentPrice', 0)
+            high_52 = info.get('fiftyTwoWeekHigh', 0)
+            pe = info.get('trailingPE', 999) 
+            if current > 0 and high_52 > 0:
+                discount = ((high_52 - current) / high_52) * 100
+                if discount > 10 or (pe < 25 and pe > 0):
+                    opportunities.append({"Ticker": ticker, "Price": f"${current}", "Discount": f"-{discount:.1f}%", "P/E": f"{pe:.1f}", "Sector": info.get('sector', 'N/A')})
+        except: continue
+    return pd.DataFrame(opportunities)
+
+def calculate_dcf(fcf, shares, growth, discount, terminal_growth=0.03):
+    if shares == 0 or fcf == 0: return 0
+    future_cash_flows = [fcf * ((1 + growth) ** i) / ((1 + discount) ** i) for i in range(1, 6)]
+    terminal_val = (fcf * ((1 + growth) ** 5) * (1 + terminal_growth)) / (discount - terminal_growth)
+    return round((sum(future_cash_flows) + (terminal_val / ((1 + discount) ** 5))) / shares, 2)
+
+# --- 4. TABS INTERFACE ---
+tab_portfolio, tab_analysis = st.tabs(["📊 Portfolio War Room", "🔬 Analysis Lab"])
+
+# --- TAB 1: PORTFOLIO ---
+with tab_portfolio:
+    st.subheader("HGB Capital | Live Holdings")
+    try:
+        raw_df = conn.read(worksheet="Portfolio", ttl=5)
+        if raw_df is not None and not raw_df.empty:
+            df_rich, total_equity, total_pl = get_portfolio_performance(raw_df)
+            
+            # Scoreboard
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total Equity", f"${total_equity:,.2f}")
+            c2.metric("Unrealized P&L", f"${total_pl:,.2f}", delta=f"{(total_pl/total_equity)*100:.2f}%" if total_equity > 0 else "0%")
+            c3.metric("Active Positions", len(df_rich))
+            st.divider()
+            
+            # SECTOR & HOLDINGS VISUALS
+            col_chart1, col_chart2 = st.columns(2)
+            with col_chart1:
+                st.write("**Holdings (By Size)**")
+                fig1 = px.pie(df_rich, values='Market Value', names='Ticker', hole=0.4)
+                fig1.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=300)
+                st.plotly_chart(fig1, use_container_width=True)
+            with col_chart2:
+                st.write("**Risk Breakdown (By Sector)**")
+                fig2 = px.pie(df_rich, values='Market Value', names='Sector', color_discrete_sequence=px.colors.sequential.RdBu)
+                fig2.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=300)
+                st.plotly_chart(fig2, use_container_width=True)
+
+            st.write("**Detailed View**")
+            st.dataframe(df_rich[['Ticker', 'Sector', 'Shares', 'Cost', 'Current Price', 'Market Value', 'Return (%)']].style.format({"Cost": "${:.2f}", "Current Price": "${:.2f}", "Market Value": "${:,.2f}", "Return (%)": "{:.1f}%"}), use_container_width=True)
+
+            # Watchlist
+            st.divider()
+            st.subheader("🎯 Watchlist Targets")
+            try:
+                df_watch = conn.read(worksheet="Watchlist", ttl=5)
+                if not df_watch.empty: st.dataframe(df_watch.sort_index(ascending=False), use_container_width=True, hide_index=True)
+            except: st.caption("Watchlist empty.")
+        else: st.info("Portfolio is empty. Add positions to Google Sheets.")
+    except Exception as e: st.warning(f"Sync Error: {e}")
+    
+    if st.button("Refresh Portfolio"): st.cache_data.clear(); st.rerun()
+
+# --- TAB 2: ANALYSIS LAB ---
+with tab_analysis:
+    with st.expander("📡 Market Radar (Scan for Opportunities)", expanded=False):
+        if st.button("Scan Market"):
+            with st.spinner("Scanning Titans..."):
+                opps = scan_market_opportunities()
+                if not opps.empty: st.dataframe(opps, use_container_width=True)
+                else: st.info("No obvious discounts found.")
+
+    st.divider()
+    st.subheader("Deep Dive Analysis")
+    col_input, col_assumptions = st.columns([1, 2])
+    with col_input: ticker_input = st.text_input("Enter Ticker (e.g. NVDA)").upper()
+    
+    if ticker_input:
+        data = get_financial_data(ticker_input)
+        if data:
+            # 1. VALUATION
+            smart_discount = max(0.06, min(0.042 + (data['Beta'] * 0.055), 0.15))
+            with col_assumptions:
+                growth = st.slider(f"Growth (Analyst: {data['Analyst_Growth']:.1%})", 0.0, 0.30, float(data['Analyst_Growth']), 0.01)
+                discount = st.slider(f"Discount (Beta: {data['Beta']})", 0.05, 0.20, float(smart_discount), 0.01)
+            
+            intrinsic_value = calculate_dcf(data['FCF'], data['Shares'], growth, discount)
+            upside = ((intrinsic_value - data['Price']) / data['Price']) * 100
+            
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Market Price", f"${data['Price']}")
+            m2.metric("Fair Value", f"${intrinsic_value}", delta=f"{upside:.1f}%")
+            m3.metric("Free Cash Flow", f"${data['FCF']/1e9:.2f} B")
+            
+            # 2. CHARTS & NEWS
+            tab_financials, tab_news = st.tabs(["📈 Financials", "📰 News Feed"])
+            
+            with tab_financials:
+                if not data['History'].empty:
+                    years = st.slider("Select time scope (years)", min_value=1, max_value=4, value=4, step=1)
+                    history_filtered = data['History'].tail(years)
+                    st.write(f"**Performance Trend ({years}yr)**")
+                    st.bar_chart(history_filtered, color=["#2E86C1", "#28B463"])
+                else:
+                    st.caption("No historical data available.")
+                    
+            with tab_news:
+                st.write(f"**Latest News for {data['Name']}**")
+                if data['News']:
+                    for news_item in data['News']:
+                        title = news_item.get('title')
+                        if not title: continue
+                        link = news_item.get('link', '#')
+                        publisher = news_item.get('publisher', 'Unknown')
+                        publish_time = news_item.get('providerPublishTime', 0)
+                        st.markdown(f"**[{title}]({link})**")
+                        st.caption(f"Source: {publisher} | {datetime.fromtimestamp(publish_time).strftime('%Y-%m-%d %H:%M')}")
+                        st.divider()
+                else:
+                    st.caption("No recent news available.")
+
+            # 3. ACTION
+            notes = st.text_area("Investment Thesis", height=100)
+            if st.button(f"Add {ticker_input} to Watchlist"):
+                new_row = pd.DataFrame([{"Ticker": ticker_input, "Price_At_Add": data['Price'], "Added_By": user, "Notes": notes, "Status": "Watching"}])
+                try:
+                    curr = conn.read(worksheet="Watchlist")
+                    conn.update(worksheet="Watchlist", data=pd.concat([curr, new_row], ignore_index=True))
+                    st.success("Synced!")
+                except: st.error("Error syncing.")
