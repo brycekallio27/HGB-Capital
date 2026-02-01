@@ -1,0 +1,7 @@
+streamlit
+pandas
+yfinance
+st-gsheets-connection
+pypfopt
+scikit-learn
+matplotlib
