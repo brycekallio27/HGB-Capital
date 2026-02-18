@@ -4,9 +4,8 @@ import pandas as pd
 import yfinance as yf
 import numpy as np
 import plotly.express as px
-import datetime
-import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timezone
+from pypfopt import EfficientFrontier, risk_models, expected_returns
 
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Project Photizo", layout="wide")
@@ -26,6 +25,7 @@ st.sidebar.success(f"Active Session: {user}")
 
 # --- 3. THE BRAIN: FINANCIAL MODELS & DATA ---
 
+@st.cache_data(ttl=300)
 def get_portfolio_performance(df):
     """Calculates Market Value, P&L, Allocation, and Sector"""
     if df.empty: return None, 0, 0
@@ -69,6 +69,7 @@ def get_portfolio_performance(df):
     
     return df, total_equity, total_pl
 
+@st.cache_data(ttl=300)
 def get_financial_data(ticker):
     """Fetches data for DCF + History Charts + News"""
     try:
@@ -119,6 +120,7 @@ def get_financial_data(ticker):
         }
     except: return None
 
+@st.cache_data(ttl=300)
 def scan_market_opportunities():
     watchlist_titans = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "JPM", "V", "JNJ", "PFE", "KO", "PEP", "XOM", "CVX"]
     opportunities = []
@@ -142,8 +144,26 @@ def calculate_dcf(fcf, shares, growth, discount, terminal_growth=0.03):
     terminal_val = (fcf * ((1 + growth) ** 5) * (1 + terminal_growth)) / (discount - terminal_growth)
     return round((sum(future_cash_flows) + (terminal_val / ((1 + discount) ** 5))) / shares, 2)
 
+def optimize_portfolio(tickers, strategy, target_return=None):
+    """Compute optimal portfolio allocation using pypfopt."""
+    prices = yf.download(tickers, period="1y", progress=False)['Close']
+    if prices.empty:
+        return None, None
+    mu = expected_returns.mean_historical_return(prices)
+    S = risk_models.sample_cov(prices)
+    ef = EfficientFrontier(mu, S)
+    if strategy == "Max Sharpe":
+        ef.max_sharpe()
+    elif strategy == "Min Volatility":
+        ef.min_volatility()
+    elif strategy == "Target Return":
+        ef.efficient_return(target_return)
+    weights = ef.clean_weights()
+    performance = ef.portfolio_performance()
+    return weights, performance
+
 # --- 4. TABS INTERFACE ---
-tab_portfolio, tab_analysis = st.tabs(["📊 Portfolio War Room", "🔬 Analysis Lab"])
+tab_portfolio, tab_analysis, tab_optimizer = st.tabs(["📊 Portfolio War Room", "🔬 Analysis Lab", "⚙️ Portfolio Optimizer"])
 
 # --- TAB 1: PORTFOLIO ---
 with tab_portfolio:
@@ -235,13 +255,19 @@ with tab_analysis:
                 st.write(f"**Latest News for {data['Name']}**")
                 if data['News']:
                     for news_item in data['News']:
-                        title = news_item.get('title')
+                        content = news_item.get('content', {})
+                        title = content.get('title')
                         if not title: continue
-                        link = news_item.get('link', '#')
-                        publisher = news_item.get('publisher', 'Unknown')
-                        publish_time = news_item.get('providerPublishTime', 0)
+                        link = content.get('canonicalUrl', {}).get('url', '#')
+                        publisher = content.get('provider', {}).get('displayName', 'Unknown')
+                        pub_date_str = content.get('pubDate', '')
+                        try:
+                            pub_dt = datetime.fromisoformat(pub_date_str.replace('Z', '+00:00'))
+                            pub_formatted = pub_dt.astimezone().strftime('%Y-%m-%d %H:%M')
+                        except Exception:
+                            pub_formatted = pub_date_str
                         st.markdown(f"**[{title}]({link})**")
-                        st.caption(f"Source: {publisher} | {datetime.fromtimestamp(publish_time).strftime('%Y-%m-%d %H:%M')}")
+                        st.caption(f"Source: {publisher} | {pub_formatted}")
                         st.divider()
                 else:
                     st.caption("No recent news available.")
@@ -255,3 +281,61 @@ with tab_analysis:
                     conn.update(worksheet="Watchlist", data=pd.concat([curr, new_row], ignore_index=True))
                     st.success("Synced!")
                 except: st.error("Error syncing.")
+
+# --- TAB 3: PORTFOLIO OPTIMIZER ---
+with tab_optimizer:
+    st.subheader("Portfolio Optimizer")
+    st.caption("Compute optimal allocations using Mean-Variance Optimization (pypfopt)")
+
+    # Pre-populate tickers from Portfolio sheet if available
+    default_tickers = ""
+    try:
+        portfolio_df = conn.read(worksheet="Portfolio", ttl=5)
+        if portfolio_df is not None and not portfolio_df.empty and 'Ticker' in portfolio_df.columns:
+            default_tickers = "\n".join(portfolio_df['Ticker'].dropna().unique().tolist())
+    except:
+        pass
+
+    opt_col1, opt_col2 = st.columns([1, 2])
+    with opt_col1:
+        tickers_text = st.text_area("Tickers (one per line)", value=default_tickers, height=200)
+        strategy = st.radio("Strategy", ["Max Sharpe", "Min Volatility", "Target Return"])
+        target_ret = None
+        if strategy == "Target Return":
+            target_ret = st.slider("Target Annual Return", 0.0, 0.50, 0.10, 0.01, format="%.0f%%")
+        run_opt = st.button("Optimize")
+
+    with opt_col2:
+        if run_opt:
+            ticker_list = [t.strip().upper() for t in tickers_text.strip().splitlines() if t.strip()]
+            if len(ticker_list) < 2:
+                st.warning("Enter at least 2 tickers.")
+            else:
+                with st.spinner("Optimizing..."):
+                    try:
+                        weights, perf = optimize_portfolio(ticker_list, strategy, target_ret)
+                        if weights is None:
+                            st.error("Could not download price data for the given tickers.")
+                        else:
+                            exp_ret, vol, sharpe = perf
+                            m1, m2, m3 = st.columns(3)
+                            m1.metric("Expected Return", f"{exp_ret:.2%}")
+                            m2.metric("Volatility", f"{vol:.2%}")
+                            m3.metric("Sharpe Ratio", f"{sharpe:.2f}")
+
+                            # Filter to non-zero weights
+                            alloc = {k: v for k, v in weights.items() if v > 0}
+                            alloc_df = pd.DataFrame({"Ticker": list(alloc.keys()), "Weight": list(alloc.values())})
+                            alloc_df = alloc_df.sort_values("Weight", ascending=True)
+
+                            fig = px.bar(alloc_df, x="Weight", y="Ticker", orientation="h",
+                                         text=alloc_df["Weight"].apply(lambda w: f"{w:.1%}"))
+                            fig.update_layout(xaxis_tickformat=".0%", margin=dict(t=10, b=10), height=max(300, len(alloc_df) * 35))
+                            st.plotly_chart(fig, use_container_width=True)
+
+                            st.dataframe(
+                                alloc_df.sort_values("Weight", ascending=False).style.format({"Weight": "{:.2%}"}),
+                                use_container_width=True, hide_index=True
+                            )
+                    except Exception as e:
+                        st.error(f"Optimization failed: {e}")
