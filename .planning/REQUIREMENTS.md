@@ -68,28 +68,28 @@ Which phases cover which requirements. Populated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DSYS-01 | — | Pending |
-| DSYS-02 | — | Pending |
-| DSYS-03 | — | Pending |
-| DSYS-04 | — | Pending |
-| DSYS-05 | — | Pending |
-| PORT-01 | — | Pending |
-| PORT-02 | — | Pending |
-| PORT-03 | — | Pending |
-| SBAR-01 | — | Pending |
-| SBAR-02 | — | Pending |
-| ANLS-01 | — | Pending |
-| ANLS-02 | — | Pending |
-| ANLS-03 | — | Pending |
-| PLSH-01 | — | Pending |
-| PLSH-02 | — | Pending |
-| PLSH-03 | — | Pending |
+| DSYS-01 | Phase 1 | Pending |
+| DSYS-02 | Phase 1 | Pending |
+| DSYS-04 | Phase 1 | Pending |
+| DSYS-05 | Phase 1 | Pending |
+| PLSH-03 | Phase 1 | Pending |
+| DSYS-03 | Phase 2 | Pending |
+| PLSH-01 | Phase 2 | Pending |
+| PLSH-02 | Phase 2 | Pending |
+| PORT-01 | Phase 3 | Pending |
+| PORT-02 | Phase 3 | Pending |
+| PORT-03 | Phase 3 | Pending |
+| SBAR-01 | Phase 4 | Pending |
+| SBAR-02 | Phase 4 | Pending |
+| ANLS-01 | Phase 5 | Pending |
+| ANLS-02 | Phase 5 | Pending |
+| ANLS-03 | Phase 5 | Pending |
 
 **Coverage:**
 - v1.0 requirements: 16 total
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 16 ⚠️
+- Mapped to phases: 16 (complete)
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-02-18*
-*Last updated: 2026-02-18 after initial definition*
+*Last updated: 2026-02-18 — Traceability filled after roadmap creation*
