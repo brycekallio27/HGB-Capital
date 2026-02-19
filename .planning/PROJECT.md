@@ -8,6 +8,19 @@ Project Photizo is HGB Capital's internal investment engine — a Streamlit-base
 
 Partners can trust the numbers and feel confident sharing the screen — because the app looks as serious as the capital it tracks.
 
+## Current Milestone: v1.0 Premium UI Redesign
+
+**Goal:** Transform the app from a default Streamlit prototype into a premium, professional-grade fintech interface worthy of the HGB Capital brand.
+
+**Target features:**
+- Full black/gold design system via CSS injection
+- Dark/light mode toggle
+- Custom KPI cards for Portfolio War Room
+- Plotly charts restyled to brand palette
+- Sidebar branding and partner selector overhaul
+- Card-based layouts for Analysis Lab and Optimizer tabs
+- Typography hierarchy and visual clutter cleanup
+
 ## Requirements
 
 ### Validated
@@ -72,4 +85,4 @@ The codebase map is in `.planning/codebase/`. Key concern from CONCERNS.md: in-p
 | All 3 tabs styled equally | No one tab is more important — partners use all of them | — Pending |
 
 ---
-*Last updated: 2026-02-18 after initialization*
+*Last updated: 2026-02-18 after milestone v1.0 started*
