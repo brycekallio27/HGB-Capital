@@ -30,7 +30,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. All numeric data (dollar values, percentages) renders in Inter with tabular-nums alignment — decimal points column-align in all contexts
   4. Positive P&L values display in semantic green and negative values in semantic red, regardless of brand gold usage elsewhere
   5. The DataFrame mutation bug in `get_portfolio_performance` is patched — `df.copy()` is the first operation in that function
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — config.toml + CSS foundation (DSYS-01, DSYS-04): Inter font via config.toml, DARK_CSS/LIGHT_CSS constants, inject_css() wired at app startup
+- [ ] 01-02-PLAN.md — Dark/light mode toggle (DSYS-02): _toggle_theme callback, sidebar icon button, human verify checkpoint
+- [ ] 01-03-PLAN.md — Semantic P&L colors + DataFrame fix (DSYS-05, PLSH-03): df.copy() bug patch, metric delta CSS overrides
 
 ### Phase 2: Global Widget Overrides
 **Goal**: Every standard Streamlit widget across the entire app matches the HGB brand palette, and layout clutter is cleaned up globally
@@ -81,7 +86,7 @@ Note: Phase 4 (Sidebar) depends on Phase 1 only and could run in parallel with P
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Design System Foundation | 0/? | Not started | - |
+| 1. Design System Foundation | 0/3 | Planned | - |
 | 2. Global Widget Overrides | 0/? | Not started | - |
 | 3. Portfolio War Room | 0/? | Not started | - |
 | 4. Sidebar | 0/? | Not started | - |
