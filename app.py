@@ -9,6 +9,360 @@ from pypfopt import EfficientFrontier, risk_models, expected_returns
 
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Project Photizo", layout="wide")
+
+# --- DESIGN SYSTEM: CSS Constants & Injection ---
+
+DARK_CSS = """
+<style>
+/* Global app background */
+.stApp,
+[data-testid="stAppViewContainer"] {
+    background-color: #0A0A0A !important;
+    color: #F5F5F5;
+}
+
+/* Sidebar surface */
+[data-testid="stSidebar"] {
+    background-color: #111111 !important;
+}
+
+/* Metric values — tabular numerals + gold accent */
+[data-testid="stMetricValue"] {
+    font-variant-numeric: lining-nums tabular-nums;
+    font-feature-settings: "lnum" 1, "tnum" 1;
+    color: #F5F5F5;
+}
+
+/* Metric delta — tabular numerals */
+[data-testid="stMetricDelta"] {
+    font-variant-numeric: lining-nums tabular-nums;
+    font-feature-settings: "lnum" 1, "tnum" 1;
+}
+
+/* DataFrames outer wrapper — tabular numerals (may not penetrate canvas; see Phase 3) */
+[data-testid="stDataFrame"] {
+    font-variant-numeric: lining-nums tabular-nums;
+    font-feature-settings: "lnum" 1, "tnum" 1;
+}
+
+/* Semantic P&L colors — DSYS-05 */
+.pl-positive { color: #16A34A !important; }
+.pl-negative { color: #DC2626 !important; }
+
+/* Gold accent on interactive elements */
+.stButton > button {
+    border-color: #C5A059;
+    color: #C5A059;
+}
+
+/* Semantic P&L delta colors — DSYS-05 */
+[data-testid="stMetricDelta"][aria-label*="increased"],
+[data-testid="stMetricDelta"] svg[class*="up"],
+.stMetricDelta--up {
+    color: #16A34A !important;
+    fill: #16A34A !important;
+}
+[data-testid="stMetricDelta"][aria-label*="decreased"],
+[data-testid="stMetricDelta"] svg[class*="down"],
+.stMetricDelta--down {
+    color: #DC2626 !important;
+    fill: #DC2626 !important;
+}
+[data-testid="stMetricDelta"] > div {
+    font-variant-numeric: lining-nums tabular-nums;
+}
+
+/* ── Phase 2: Global Widget Overrides (DSYS-03) ───────────────────────── */
+
+/* Tabs — gold active underline, no default blue */
+.stTabs [data-baseweb="tab-list"] {
+    background-color: transparent;
+    border-bottom: 1px solid #2A2A2A;
+    gap: 0;
+}
+.stTabs [data-baseweb="tab"] {
+    color: #9E804B;
+    background-color: transparent;
+    padding: 0.5rem 1.25rem;
+    border-bottom: 2px solid transparent;
+}
+.stTabs [aria-selected="true"] {
+    color: #C5A059 !important;
+    border-bottom: 2px solid #C5A059 !important;
+    background-color: transparent !important;
+}
+.stTabs [data-baseweb="tab"]:hover {
+    color: #C5A059;
+    background-color: rgba(197, 160, 89, 0.06);
+}
+.stTabs [data-baseweb="tab-highlight"] {
+    background-color: #C5A059 !important;
+}
+
+/* Buttons — full brand treatment with hover/active states */
+.stButton > button {
+    background-color: transparent;
+    border: 1px solid #C5A059;
+    color: #C5A059;
+    font-weight: 500;
+    letter-spacing: 0.03em;
+    transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+.stButton > button:hover {
+    background-color: rgba(197, 160, 89, 0.1) !important;
+    border-color: #C5A059 !important;
+    color: #C5A059 !important;
+    box-shadow: 0 0 0 1px #C5A059;
+}
+.stButton > button:active {
+    background-color: rgba(197, 160, 89, 0.2) !important;
+}
+
+/* Text inputs and text areas */
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea {
+    background-color: #1A1A1A !important;
+    border-color: #2A2A2A !important;
+    color: #F5F5F5 !important;
+}
+[data-testid="stTextInput"] input:focus,
+[data-testid="stTextArea"] textarea:focus {
+    border-color: #C5A059 !important;
+    box-shadow: 0 0 0 1px rgba(197, 160, 89, 0.4) !important;
+}
+
+/* Selectbox */
+[data-testid="stSelectbox"] > div > div {
+    background-color: #1A1A1A !important;
+    border-color: #2A2A2A !important;
+}
+
+/* Expander */
+[data-testid="stExpander"] details {
+    border-color: #2A2A2A !important;
+    background-color: #111111 !important;
+}
+
+/* Spinner — gold */
+[data-testid="stSpinner"] svg {
+    stroke: #C5A059 !important;
+}
+
+/* Dividers — subtle, not heavy */
+hr {
+    border-color: #1E1E1E !important;
+    margin: 0.75rem 0 !important;
+}
+
+/* ── Phase 2: Visual Hierarchy (PLSH-01) ──────────────────────────────── */
+
+/* Metric labels — uppercase muted secondary tier */
+[data-testid="stMetricLabel"] {
+    color: #9E804B !important;
+    font-size: 0.7rem !important;
+    font-weight: 500 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+/* Captions — tertiary, clearly subordinate */
+.stCaption, [data-testid="stCaption"] p {
+    color: #555555 !important;
+    font-size: 0.75rem !important;
+}
+
+/* Subheaders — gold, intentional */
+[data-testid="stHeadingWithActionElements"] h3,
+h3 {
+    color: #C5A059;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+}
+</style>
+"""
+
+LIGHT_CSS = """
+<style>
+/* Global app background */
+.stApp,
+[data-testid="stAppViewContainer"] {
+    background-color: #FAFAFA !important;
+    color: #1A1A1A;
+}
+
+/* Sidebar surface */
+[data-testid="stSidebar"] {
+    background-color: #FFFFFF !important;
+}
+
+/* Metric values — tabular numerals */
+[data-testid="stMetricValue"] {
+    font-variant-numeric: lining-nums tabular-nums;
+    font-feature-settings: "lnum" 1, "tnum" 1;
+    color: #1A1A1A;
+}
+
+/* Metric delta — tabular numerals */
+[data-testid="stMetricDelta"] {
+    font-variant-numeric: lining-nums tabular-nums;
+    font-feature-settings: "lnum" 1, "tnum" 1;
+}
+
+/* DataFrames outer wrapper — tabular numerals (may not penetrate canvas; see Phase 3) */
+[data-testid="stDataFrame"] {
+    font-variant-numeric: lining-nums tabular-nums;
+    font-feature-settings: "lnum" 1, "tnum" 1;
+}
+
+/* Semantic P&L colors — DSYS-05 */
+.pl-positive { color: #16A34A !important; }
+.pl-negative { color: #DC2626 !important; }
+
+/* Gold accent on interactive elements */
+.stButton > button {
+    border-color: #C5A059;
+    color: #C5A059;
+}
+
+/* Semantic P&L delta colors — DSYS-05 */
+[data-testid="stMetricDelta"][aria-label*="increased"],
+[data-testid="stMetricDelta"] svg[class*="up"],
+.stMetricDelta--up {
+    color: #16A34A !important;
+    fill: #16A34A !important;
+}
+[data-testid="stMetricDelta"][aria-label*="decreased"],
+[data-testid="stMetricDelta"] svg[class*="down"],
+.stMetricDelta--down {
+    color: #DC2626 !important;
+    fill: #DC2626 !important;
+}
+[data-testid="stMetricDelta"] > div {
+    font-variant-numeric: lining-nums tabular-nums;
+}
+
+/* ── Phase 2: Global Widget Overrides (DSYS-03) ───────────────────────── */
+
+/* Tabs — gold active underline */
+.stTabs [data-baseweb="tab-list"] {
+    background-color: transparent;
+    border-bottom: 1px solid #E0E0E0;
+    gap: 0;
+}
+.stTabs [data-baseweb="tab"] {
+    color: #9E9E9E;
+    background-color: transparent;
+    padding: 0.5rem 1.25rem;
+    border-bottom: 2px solid transparent;
+}
+.stTabs [aria-selected="true"] {
+    color: #C5A059 !important;
+    border-bottom: 2px solid #C5A059 !important;
+    background-color: transparent !important;
+}
+.stTabs [data-baseweb="tab"]:hover {
+    color: #C5A059;
+    background-color: rgba(197, 160, 89, 0.06);
+}
+.stTabs [data-baseweb="tab-highlight"] {
+    background-color: #C5A059 !important;
+}
+
+/* Buttons */
+.stButton > button {
+    background-color: transparent;
+    border: 1px solid #C5A059;
+    color: #C5A059;
+    font-weight: 500;
+    letter-spacing: 0.03em;
+    transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+.stButton > button:hover {
+    background-color: rgba(197, 160, 89, 0.08) !important;
+    border-color: #C5A059 !important;
+    color: #C5A059 !important;
+    box-shadow: 0 0 0 1px #C5A059;
+}
+.stButton > button:active {
+    background-color: rgba(197, 160, 89, 0.15) !important;
+}
+
+/* Text inputs and text areas */
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea {
+    background-color: #FFFFFF !important;
+    border-color: #D0D0D0 !important;
+    color: #1A1A1A !important;
+}
+[data-testid="stTextInput"] input:focus,
+[data-testid="stTextArea"] textarea:focus {
+    border-color: #C5A059 !important;
+    box-shadow: 0 0 0 1px rgba(197, 160, 89, 0.4) !important;
+}
+
+/* Selectbox */
+[data-testid="stSelectbox"] > div > div {
+    background-color: #FFFFFF !important;
+    border-color: #D0D0D0 !important;
+}
+
+/* Expander */
+[data-testid="stExpander"] details {
+    border-color: #E0E0E0 !important;
+    background-color: #FFFFFF !important;
+}
+
+/* Spinner — gold */
+[data-testid="stSpinner"] svg {
+    stroke: #C5A059 !important;
+}
+
+/* Dividers — subtle */
+hr {
+    border-color: #E8E8E8 !important;
+    margin: 0.75rem 0 !important;
+}
+
+/* ── Phase 2: Visual Hierarchy (PLSH-01) ──────────────────────────────── */
+
+/* Metric labels — uppercase muted secondary tier */
+[data-testid="stMetricLabel"] {
+    color: #9E804B !important;
+    font-size: 0.7rem !important;
+    font-weight: 500 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+/* Captions — tertiary, clearly subordinate */
+.stCaption, [data-testid="stCaption"] p {
+    color: #888888 !important;
+    font-size: 0.75rem !important;
+}
+
+/* Subheaders — muted gold on light */
+[data-testid="stHeadingWithActionElements"] h3,
+h3 {
+    color: #9E804B;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+}
+</style>
+"""
+
+
+def inject_css(is_dark: bool) -> None:
+    """Inject the appropriate CSS block based on current theme mode."""
+    st.markdown(DARK_CSS if is_dark else LIGHT_CSS, unsafe_allow_html=True)
+
+
+# Initialize theme session state (dark is brand default)
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = True
+
+# Inject CSS immediately — must happen before any UI element renders
+inject_css(st.session_state.dark_mode)
+
 st.title("Project Photizo | Investment Engine")
 
 # --- 1. CONNECT TO DATABASE ---
@@ -19,8 +373,21 @@ except Exception as e:
     st.stop()
 
 # --- 2. SIDEBAR ---
+
+def _toggle_theme() -> None:
+    """Callback: flip dark_mode in session_state before rerun."""
+    st.session_state.dark_mode = not st.session_state.dark_mode
+
+_theme_icon = "🌙" if st.session_state.dark_mode else "☀️"
+st.sidebar.button(
+    _theme_icon,
+    on_click=_toggle_theme,
+    help="Toggle dark/light mode",
+    key="theme_toggle",
+)
+
 st.sidebar.header("Operations")
-user = st.sidebar.selectbox("Partner Login", ["Partner A", "Partner B", "Partner C"])
+user = st.sidebar.selectbox("Partner Login", ["Bryce K.", "Hunter S.", "Grayson W."])
 st.sidebar.success(f"Active Session: {user}")
 
 # --- 3. THE BRAIN: FINANCIAL MODELS & DATA ---
@@ -28,45 +395,53 @@ st.sidebar.success(f"Active Session: {user}")
 @st.cache_data(ttl=300)
 def get_portfolio_performance(df):
     """Calculates Market Value, P&L, Allocation, and Sector"""
+    df = df.copy()
     if df.empty: return None, 0, 0
-    
+
     tickers = df['Ticker'].tolist()
     if not tickers: return None, 0, 0
 
-    try:
-        data = yf.download(tickers, period="1d", progress=False)['Close']
-        ticker_objects = {t: yf.Ticker(t) for t in tickers}
-    except:
-        return df, 0, 0 
+    # Cash / money-market positions are priced at $1.00 — never pass to yfinance
+    CASH_TICKERS = {"CASH", "MMKT", "SPAXX", "FDRXX", "FDIC", "FCASH", "CORE"}
+    cash_mask = df['Ticker'].str.upper().isin(CASH_TICKERS)
+    equity_tickers = df[~cash_mask]['Ticker'].tolist()
 
-    # Get Price & Sector Data
-    if len(tickers) == 1:
-        t = tickers[0]
+    # Stamp cash rows immediately — price is always $1.00, no P&L
+    df.loc[cash_mask, 'Current Price'] = 1.00
+    df.loc[cash_mask, 'Sector'] = 'Cash'
+
+    # Fetch prices + sector only for equity positions
+    if equity_tickers:
         try:
-            current_price = ticker_objects[t].info.get('currentPrice', 0)
-            sector = ticker_objects[t].info.get('sector', 'Unknown')
-        except:
-            current_price = 0
-            sector = 'Unknown'
-        df['Current Price'] = current_price
-        df['Sector'] = sector
-    else:
-        # Multiple Tickers
-        current_prices = data.iloc[-1]
-        df['Current Price'] = df['Ticker'].map(current_prices)
-        # Fetch sectors one by one (yfinance doesn't do bulk sector fetch easily)
-        df['Sector'] = df['Ticker'].apply(lambda t: ticker_objects[t].info.get('sector', 'Unknown'))
+            close_data = yf.download(equity_tickers, period="1d", progress=False)['Close']
+            ticker_objects = {t: yf.Ticker(t) for t in equity_tickers}
+        except Exception as e:
+            return df, 0, 0
+
+        if close_data.empty:
+            return df, 0, 0
+
+        # Normalize: yfinance 1.1+ always returns a DataFrame with tickers as columns
+        # but guard against a Series being returned in edge cases
+        if isinstance(close_data, pd.Series):
+            close_data = close_data.to_frame(name=equity_tickers[0])
+
+        current_prices = close_data.iloc[-1]
+        df.loc[~cash_mask, 'Current Price'] = df.loc[~cash_mask, 'Ticker'].map(current_prices)
+        df.loc[~cash_mask, 'Sector'] = df.loc[~cash_mask, 'Ticker'].apply(
+            lambda t: ticker_objects[t].info.get('sector', 'Unknown') if t in ticker_objects else 'Unknown'
+        )
 
     # Metrics
     df['Market Value'] = df['Shares'] * df['Current Price']
-    if 'Cost' not in df.columns: df['Cost'] = 0 
+    if 'Cost' not in df.columns: df['Cost'] = 0
     df['Total Cost'] = df['Shares'] * df['Cost']
     df['Unrealized Gain ($)'] = df['Market Value'] - df['Total Cost']
     df['Return (%)'] = df.apply(lambda x: ((x['Market Value'] - x['Total Cost']) / x['Total Cost'] * 100) if x['Total Cost'] > 0 else 0, axis=1)
-    
-    total_equity = df['Market Value'].sum()
-    total_pl = df['Unrealized Gain ($)'].sum()
-    
+
+    total_equity = df['Market Value'].fillna(0).sum()
+    total_pl = df['Unrealized Gain ($)'].fillna(0).sum()
+
     return df, total_equity, total_pl
 
 @st.cache_data(ttl=300)
@@ -80,12 +455,13 @@ def get_financial_data(ticker):
         if cashflow.empty: return None
         try:
             fcf = cashflow.loc['Free Cash Flow'].iloc[0]
-        except:
+        except KeyError:
             try:
                 ocf = cashflow.loc['Operating Cash Flow'].iloc[0]
                 capex = cashflow.loc['Capital Expenditure'].iloc[0]
                 fcf = ocf + capex
-            except: fcf = 0
+            except KeyError:
+                fcf = 0
         
         analyst_growth = info.get('earningsGrowth', 0.10)
         if analyst_growth is None: analyst_growth = 0.08
@@ -105,7 +481,7 @@ def get_financial_data(ticker):
         news = []
         try:
             news = stock.news[:3]
-        except:
+        except Exception:
             pass
 
         return {
@@ -118,7 +494,8 @@ def get_financial_data(ticker):
             "History": history,
             "News": news
         }
-    except: return None
+    except Exception as e:
+        return None
 
 @st.cache_data(ttl=300)
 def scan_market_opportunities():
@@ -135,7 +512,8 @@ def scan_market_opportunities():
                 discount = ((high_52 - current) / high_52) * 100
                 if discount > 10 or (pe < 25 and pe > 0):
                     opportunities.append({"Ticker": ticker, "Price": f"${current}", "Discount": f"-{discount:.1f}%", "P/E": f"{pe:.1f}", "Sector": info.get('sector', 'N/A')})
-        except: continue
+        except Exception:
+            continue
     return pd.DataFrame(opportunities)
 
 def calculate_dcf(fcf, shares, growth, discount, terminal_growth=0.03):
@@ -176,8 +554,9 @@ with tab_portfolio:
             # Scoreboard
             c1, c2, c3 = st.columns(3)
             c1.metric("Total Equity", f"${total_equity:,.2f}")
-            c2.metric("Unrealized P&L", f"${total_pl:,.2f}", delta=f"{(total_pl/total_equity)*100:.2f}%" if total_equity > 0 else "0%")
+            c2.metric("Unrealized P&L", f"${total_pl:,.2f}", delta=f"{(total_pl/total_equity)*100:.2f}%" if pd.notna(total_equity) and total_equity > 0 else "0%")
             c3.metric("Active Positions", len(df_rich))
+            st.caption("Prices reflect previous close via yfinance · Add a CASH row (Shares = dollar balance) to include money market in total")
             st.divider()
             
             # SECTOR & HOLDINGS VISUALS
@@ -202,7 +581,8 @@ with tab_portfolio:
             try:
                 df_watch = conn.read(worksheet="Watchlist", ttl=5)
                 if not df_watch.empty: st.dataframe(df_watch.sort_index(ascending=False), use_container_width=True, hide_index=True)
-            except: st.caption("Watchlist empty.")
+            except Exception as e:
+                st.caption(f"Watchlist unavailable: {e}")
         else: st.info("Portfolio is empty. Add positions to Google Sheets.")
     except Exception as e: st.warning(f"Sync Error: {e}")
     
@@ -217,7 +597,6 @@ with tab_analysis:
                 if not opps.empty: st.dataframe(opps, use_container_width=True)
                 else: st.info("No obvious discounts found.")
 
-    st.divider()
     st.subheader("Deep Dive Analysis")
     col_input, col_assumptions = st.columns([1, 2])
     with col_input: ticker_input = st.text_input("Enter Ticker (e.g. NVDA)").upper()
@@ -280,7 +659,8 @@ with tab_analysis:
                     curr = conn.read(worksheet="Watchlist")
                     conn.update(worksheet="Watchlist", data=pd.concat([curr, new_row], ignore_index=True))
                     st.success("Synced!")
-                except: st.error("Error syncing.")
+                except Exception as e:
+                    st.error(f"Error syncing to Sheets: {e}")
 
 # --- TAB 3: PORTFOLIO OPTIMIZER ---
 with tab_optimizer:
@@ -293,7 +673,7 @@ with tab_optimizer:
         portfolio_df = conn.read(worksheet="Portfolio", ttl=5)
         if portfolio_df is not None and not portfolio_df.empty and 'Ticker' in portfolio_df.columns:
             default_tickers = "\n".join(portfolio_df['Ticker'].dropna().unique().tolist())
-    except:
+    except Exception:
         pass
 
     opt_col1, opt_col2 = st.columns([1, 2])

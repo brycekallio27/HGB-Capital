@@ -20,3 +20,10 @@ build/
 
 # OS
 .DS_Store
+
+# Claude session data
+.claude/
+
+# Nested git repos (separate tools, not submodules)
+get-shit-done/
+ui-ux-pro-max-skill/

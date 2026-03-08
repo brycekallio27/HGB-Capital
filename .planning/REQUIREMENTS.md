@@ -68,14 +68,14 @@ Which phases cover which requirements. Populated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DSYS-01 | Phase 1 | Pending |
-| DSYS-02 | Phase 1 | Pending |
-| DSYS-04 | Phase 1 | Pending |
-| DSYS-05 | Phase 1 | Pending |
-| PLSH-03 | Phase 1 | Pending |
-| DSYS-03 | Phase 2 | Pending |
-| PLSH-01 | Phase 2 | Pending |
-| PLSH-02 | Phase 2 | Pending |
+| DSYS-01 | Phase 1 | ✅ Done |
+| DSYS-02 | Phase 1 | ✅ Done |
+| DSYS-04 | Phase 1 | ✅ Done |
+| DSYS-05 | Phase 1 | ✅ Done |
+| PLSH-03 | Phase 1 | ✅ Done |
+| DSYS-03 | Phase 2 | ✅ Done |
+| PLSH-01 | Phase 2 | ✅ Done |
+| PLSH-02 | Phase 2 | ✅ Done |
 | PORT-01 | Phase 3 | Pending |
 | PORT-02 | Phase 3 | Pending |
 | PORT-03 | Phase 3 | Pending |
