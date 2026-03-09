@@ -6,6 +6,30 @@ import numpy as np
 import plotly.express as px
 from datetime import datetime, timezone
 from pypfopt import EfficientFrontier, risk_models, expected_returns
+import urllib.request
+import json
+
+# ---------------------------------------------------------------------------
+# Clerk JWT verification
+# ---------------------------------------------------------------------------
+def _verify_clerk_token(token: str) -> dict | None:
+    """Verify a Clerk session JWT using the JWKS endpoint.
+    Returns the decoded claims dict on success, or None on failure.
+    Requires secrets.toml:  [clerk]  jwks_url = "https://..."
+    """
+    try:
+        from jwt import PyJWKClient, decode as jwt_decode  # PyJWT[crypto]
+        jwks_url: str = st.secrets["clerk"]["jwks_url"]
+        signing_key = PyJWKClient(jwks_url).get_signing_key_from_jwt(token).key
+        claims = jwt_decode(
+            token,
+            signing_key,
+            algorithms=["RS256"],
+            options={"verify_aud": False},
+        )
+        return claims
+    except Exception:
+        return None
 
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Project Photizo", layout="wide")
@@ -363,6 +387,52 @@ if "dark_mode" not in st.session_state:
 # Inject CSS immediately — must happen before any UI element renders
 inject_css(st.session_state.dark_mode)
 
+# ---------------------------------------------------------------------------
+# AUTH GATE — must run before any dashboard content renders
+# ---------------------------------------------------------------------------
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+    st.session_state.clerk_user = {"name": "", "email": ""}
+
+# Consume ?clerk_token= param on first arrival from the landing page
+_token = st.query_params.get("clerk_token")
+if _token and not st.session_state.authenticated:
+    _claims = _verify_clerk_token(_token)
+    if _claims:
+        st.session_state.authenticated = True
+        st.session_state.clerk_user = {
+            "name": _claims.get("name", _claims.get("given_name", "Partner")),
+            "email": _claims.get("email", ""),
+        }
+        st.query_params.clear()   # remove token from URL bar
+        st.rerun()
+    else:
+        st.error("Session token is invalid or expired. Please sign in again.")
+
+if not st.session_state.authenticated:
+    st.markdown("""
+<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;
+            min-height:80vh;text-align:center;">
+  <div style="margin-bottom:32px;">
+    <div style="color:#C5A059;font-size:42px;font-weight:700;letter-spacing:0.1em;">HGB</div>
+    <div style="color:#9E804B;font-size:11px;letter-spacing:0.2em;text-transform:uppercase;margin-top:4px;">Capital Management</div>
+  </div>
+  <div style="color:#9E804B;font-size:13px;letter-spacing:0.04em;margin-bottom:28px;">
+    Partner Portal · Private Access
+  </div>
+  <a href="https://hgbcapital.vercel.app"
+     style="display:inline-block;padding:12px 32px;background:#C5A059;color:#0A0A0A;
+            font-weight:600;font-size:14px;letter-spacing:0.04em;border-radius:6px;
+            text-decoration:none;">
+    Sign In →
+  </a>
+  <div style="color:#3A3A3A;font-size:11px;margin-top:40px;">
+    HGB Capital Management · Confidential
+  </div>
+</div>
+""", unsafe_allow_html=True)
+    st.stop()
+
 st.title("Project Photizo | Investment Engine")
 
 # --- 1. CONNECT TO DATABASE ---
@@ -388,21 +458,26 @@ st.sidebar.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# SBAR-02: Partner session identity
-user = st.sidebar.selectbox(
-    "Partner",
-    ["Bryce K.", "Hunter S.", "Grayson W."],
-    label_visibility="collapsed",
-)
+# SBAR-02: Partner session identity — now pulled from Clerk JWT
+user = st.session_state.clerk_user.get("name", "Partner")
+user_email = st.session_state.clerk_user.get("email", "")
 st.sidebar.markdown(f"""
 <div style="background:#111111;border:1px solid #2A2A2A;border-left:3px solid #C5A059;
-            border-radius:6px;padding:10px 14px;margin:6px 0 20px 0;">
+            border-radius:6px;padding:10px 14px;margin:6px 0 12px 0;">
   <div style="color:#9E804B;font-size:10px;letter-spacing:0.12em;
               text-transform:uppercase;margin-bottom:4px;">Active Session</div>
   <div style="color:#C5A059;font-size:15px;font-weight:600;
               font-family:Inter,sans-serif;">{user}</div>
+  <div style="color:#3A3A3A;font-size:10px;margin-top:3px;
+              overflow:hidden;text-overflow:ellipsis;">{user_email}</div>
 </div>
 """, unsafe_allow_html=True)
+
+def _sign_out():
+    st.session_state.authenticated = False
+    st.session_state.clerk_user = {"name": "", "email": ""}
+
+st.sidebar.button("Sign Out", on_click=_sign_out, use_container_width=True)
 
 st.sidebar.divider()
 

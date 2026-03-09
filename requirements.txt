@@ -5,3 +5,5 @@ st-gsheets-connection
 pypfopt
 scikit-learn
 matplotlib
+PyJWT[crypto]>=2.8
+cryptography>=42.0
