@@ -378,6 +378,34 @@ def _toggle_theme() -> None:
     """Callback: flip dark_mode in session_state before rerun."""
     st.session_state.dark_mode = not st.session_state.dark_mode
 
+# SBAR-01: HGB Capital wordmark
+st.sidebar.markdown("""
+<div style="padding:12px 4px 20px 4px;border-bottom:1px solid #2A2A2A;margin-bottom:20px;">
+  <div style="color:#C5A059;font-size:22px;font-weight:700;letter-spacing:0.06em;
+              line-height:1.1;font-family:Inter,sans-serif;">HGB</div>
+  <div style="color:#9E804B;font-size:10px;letter-spacing:0.18em;
+              text-transform:uppercase;margin-top:3px;">Capital Management</div>
+</div>
+""", unsafe_allow_html=True)
+
+# SBAR-02: Partner session identity
+user = st.sidebar.selectbox(
+    "Partner",
+    ["Bryce K.", "Hunter S.", "Grayson W."],
+    label_visibility="collapsed",
+)
+st.sidebar.markdown(f"""
+<div style="background:#111111;border:1px solid #2A2A2A;border-left:3px solid #C5A059;
+            border-radius:6px;padding:10px 14px;margin:6px 0 20px 0;">
+  <div style="color:#9E804B;font-size:10px;letter-spacing:0.12em;
+              text-transform:uppercase;margin-bottom:4px;">Active Session</div>
+  <div style="color:#C5A059;font-size:15px;font-weight:600;
+              font-family:Inter,sans-serif;">{user}</div>
+</div>
+""", unsafe_allow_html=True)
+
+st.sidebar.divider()
+
 _theme_icon = "🌙" if st.session_state.dark_mode else "☀️"
 st.sidebar.button(
     _theme_icon,
@@ -385,10 +413,6 @@ st.sidebar.button(
     help="Toggle dark/light mode",
     key="theme_toggle",
 )
-
-st.sidebar.header("Operations")
-user = st.sidebar.selectbox("Partner Login", ["Bryce K.", "Hunter S.", "Grayson W."])
-st.sidebar.success(f"Active Session: {user}")
 
 # --- 3. THE BRAIN: FINANCIAL MODELS & DATA ---
 

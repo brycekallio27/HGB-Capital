@@ -89,7 +89,7 @@ Note: Phase 4 (Sidebar) depends on Phase 1 only and could run in parallel with P
 | 1. Design System Foundation | 3/3 | ✅ Done | 2026-03-08 |
 | 2. Global Widget Overrides | 1/1 | ✅ Done | 2026-03-08 |
 | 3. Portfolio War Room | 3/3 | ✅ Done | 2026-03-09 |
-| 4. Sidebar | 0/? | Not started | - |
+| 4. Sidebar | 2/2 | ✅ Done | 2026-03-09 |
 | 5. Analysis Lab and Optimizer | 0/? | Not started | - |
 
 ---

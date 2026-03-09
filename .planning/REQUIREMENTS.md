@@ -79,8 +79,8 @@ Which phases cover which requirements. Populated during roadmap creation.
 | PORT-01 | Phase 3 | ✅ Done |
 | PORT-02 | Phase 3 | ✅ Done |
 | PORT-03 | Phase 3 | ✅ Done |
-| SBAR-01 | Phase 4 | Pending |
-| SBAR-02 | Phase 4 | Pending |
+| SBAR-01 | Phase 4 | ✅ Done |
+| SBAR-02 | Phase 4 | ✅ Done |
 | ANLS-01 | Phase 5 | Pending |
 | ANLS-02 | Phase 5 | Pending |
 | ANLS-03 | Phase 5 | Pending |
