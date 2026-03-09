@@ -600,6 +600,30 @@ def _kpi_card(label: str, value: str, delta: str = None, delta_positive: bool = 
   {delta_html}
 </div>"""
 
+def _alloc_breakdown(weights_dict: dict) -> str:
+    """Return HTML for a styled per-ticker allocation breakdown (ANLS-03)."""
+    rows = ""
+    for ticker, w in sorted(weights_dict.items(), key=lambda x: -x[1]):
+        pct = w * 100
+        bar_w = max(pct, 2)  # minimum bar width so tiny allocations still show
+        rows += f"""
+<div style="display:flex;align-items:center;gap:12px;padding:8px 0;
+            border-bottom:1px solid #1E1E1E;">
+  <div style="width:52px;color:#F5F5F5;font-weight:600;font-size:13px;
+              flex-shrink:0;">{ticker}</div>
+  <div style="flex:1;background:#1E1E1E;border-radius:3px;height:6px;overflow:hidden;">
+    <div style="width:{bar_w:.1f}%;background:#C5A059;height:100%;border-radius:3px;"></div>
+  </div>
+  <div style="width:44px;text-align:right;color:#C5A059;font-size:13px;
+              font-variant-numeric:lining-nums tabular-nums;flex-shrink:0;">{pct:.1f}%</div>
+</div>"""
+    return f"""
+<div style="background:#111111;border:1px solid #2A2A2A;border-radius:6px;padding:12px 16px;">
+  <div style="color:#9E804B;font-size:10px;letter-spacing:0.12em;
+              text-transform:uppercase;margin-bottom:8px;">Allocation Breakdown</div>
+  {rows}
+</div>"""
+
 # --- 4. TABS INTERFACE ---
 tab_portfolio, tab_analysis, tab_optimizer = st.tabs(["📊 Portfolio War Room", "🔬 Analysis Lab", "⚙️ Portfolio Optimizer"])
 
@@ -680,39 +704,70 @@ with tab_analysis:
                 if not opps.empty: st.dataframe(opps, use_container_width=True)
                 else: st.info("No obvious discounts found.")
 
-    st.subheader("Deep Dive Analysis")
+    # ANLS-01: Structured card layout for controls
+    st.markdown("""
+<div style="color:#C5A059;font-size:13px;font-weight:600;letter-spacing:0.06em;
+            text-transform:uppercase;margin:8px 0 12px 0;padding-bottom:8px;
+            border-bottom:1px solid #2A2A2A;">Deep Dive Analysis</div>
+""", unsafe_allow_html=True)
+
     col_input, col_assumptions = st.columns([1, 2])
-    with col_input: ticker_input = st.text_input("Enter Ticker (e.g. NVDA)").upper()
-    
+    with col_input:
+        st.markdown('<div style="color:#9E804B;font-size:10px;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:4px;">Ticker</div>', unsafe_allow_html=True)
+        ticker_input = st.text_input("Ticker", label_visibility="collapsed", placeholder="e.g. NVDA").upper()
+
     if ticker_input:
         data = get_financial_data(ticker_input)
         if data:
-            # 1. VALUATION
+            # ANLS-01: Assumption sliders in labelled card
             smart_discount = max(0.06, min(0.042 + (data['Beta'] * 0.055), 0.15))
+            with col_input:
+                st.markdown(f'<div style="color:#9E804B;font-size:10px;letter-spacing:0.1em;text-transform:uppercase;margin:16px 0 2px 0;">{data["Name"]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div style="color:#F5F5F5;font-size:20px;font-weight:600;font-variant-numeric:tabular-nums;">${data["Price"]}</div>', unsafe_allow_html=True)
             with col_assumptions:
-                growth = st.slider(f"Growth (Analyst: {data['Analyst_Growth']:.1%})", 0.0, 0.30, float(data['Analyst_Growth']), 0.01)
-                discount = st.slider(f"Discount (Beta: {data['Beta']})", 0.05, 0.20, float(smart_discount), 0.01)
-            
+                st.markdown('<div style="color:#9E804B;font-size:10px;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:8px;">Valuation Assumptions</div>', unsafe_allow_html=True)
+                growth = st.slider(f"Growth Rate (Analyst est: {data['Analyst_Growth']:.1%})", 0.0, 0.30, float(data['Analyst_Growth']), 0.01)
+                discount = st.slider(f"Discount Rate (Beta: {data['Beta']})", 0.05, 0.20, float(smart_discount), 0.01)
+
             intrinsic_value = calculate_dcf(data['FCF'], data['Shares'], growth, discount)
             upside = ((intrinsic_value - data['Price']) / data['Price']) * 100
-            
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Market Price", f"${data['Price']}")
-            m2.metric("Fair Value", f"${intrinsic_value}", delta=f"{upside:.1f}%")
-            m3.metric("Free Cash Flow", f"${data['FCF']/1e9:.2f} B")
-            
+            upside_color = "#16A34A" if upside >= 0 else "#DC2626"
+            upside_arrow = "▲" if upside >= 0 else "▼"
+
+            # ANLS-02: DCF result hero card + supporting KPI cards
+            st.markdown(f"""
+<div style="background:#111111;border:1px solid #2A2A2A;border-left:3px solid #C5A059;
+            border-radius:6px;padding:20px 24px;margin:16px 0 8px 0;">
+  <div style="color:#9E804B;font-size:10px;letter-spacing:0.12em;
+              text-transform:uppercase;margin-bottom:8px;">DCF Intrinsic Value</div>
+  <div style="color:#C5A059;font-size:40px;font-weight:700;
+              font-variant-numeric:lining-nums tabular-nums;line-height:1.1;">${intrinsic_value:,.2f}</div>
+  <div style="color:{upside_color};font-size:14px;margin-top:8px;font-weight:500;">
+    {upside_arrow} {abs(upside):.1f}% vs ${data['Price']} market price
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+            k1, k2, k3 = st.columns(3)
+            with k1:
+                st.markdown(_kpi_card("Market Price", f"${data['Price']}"), unsafe_allow_html=True)
+            with k2:
+                st.markdown(_kpi_card("Free Cash Flow", f"${data['FCF']/1e9:.2f}B"), unsafe_allow_html=True)
+            with k3:
+                st.markdown(_kpi_card("Beta", f"{data['Beta']:.2f}"), unsafe_allow_html=True)
+
             # 2. CHARTS & NEWS
             tab_financials, tab_news = st.tabs(["📈 Financials", "📰 News Feed"])
-            
+
             with tab_financials:
                 if not data['History'].empty:
                     years = st.slider("Select time scope (years)", min_value=1, max_value=4, value=4, step=1)
                     history_filtered = data['History'].tail(years)
                     st.write(f"**Performance Trend ({years}yr)**")
-                    st.bar_chart(history_filtered, color=["#2E86C1", "#28B463"])
+                    st.bar_chart(history_filtered, color=["#C5A059", "#9E804B"])
                 else:
                     st.caption("No historical data available.")
-                    
+
             with tab_news:
                 st.write(f"**Latest News for {data['Name']}**")
                 if data['News']:
@@ -781,24 +836,30 @@ with tab_optimizer:
                             st.error("Could not download price data for the given tickers.")
                         else:
                             exp_ret, vol, sharpe = perf
-                            m1, m2, m3 = st.columns(3)
-                            m1.metric("Expected Return", f"{exp_ret:.2%}")
-                            m2.metric("Volatility", f"{vol:.2%}")
-                            m3.metric("Sharpe Ratio", f"{sharpe:.2f}")
 
-                            # Filter to non-zero weights
+                            # ANLS-03: Branded KPI cards for portfolio stats
+                            m1, m2, m3 = st.columns(3)
+                            with m1:
+                                st.markdown(_kpi_card("Expected Return", f"{exp_ret:.2%}"), unsafe_allow_html=True)
+                            with m2:
+                                st.markdown(_kpi_card("Volatility", f"{vol:.2%}"), unsafe_allow_html=True)
+                            with m3:
+                                st.markdown(_kpi_card("Sharpe Ratio", f"{sharpe:.2f}"), unsafe_allow_html=True)
+
+                            # ANLS-03: Branded horizontal bar chart
                             alloc = {k: v for k, v in weights.items() if v > 0}
                             alloc_df = pd.DataFrame({"Ticker": list(alloc.keys()), "Weight": list(alloc.values())})
                             alloc_df = alloc_df.sort_values("Weight", ascending=True)
 
                             fig = px.bar(alloc_df, x="Weight", y="Ticker", orientation="h",
-                                         text=alloc_df["Weight"].apply(lambda w: f"{w:.1%}"))
-                            fig.update_layout(xaxis_tickformat=".0%", margin=dict(t=10, b=10), height=max(300, len(alloc_df) * 35))
-                            st.plotly_chart(fig, use_container_width=True)
+                                         text=alloc_df["Weight"].apply(lambda w: f"{w:.1%}"),
+                                         color_discrete_sequence=["#C5A059"])
+                            opt_layout = {**PLOTLY_DARK_LAYOUT, "height": max(280, len(alloc_df) * 40), "margin": dict(t=10, b=10, l=10, r=10)}
+                            fig.update_layout(**opt_layout, xaxis_tickformat=".0%")
+                            fig.update_traces(textfont_color="#0A0A0A", textfont_size=11)
+                            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-                            st.dataframe(
-                                alloc_df.sort_values("Weight", ascending=False).style.format({"Weight": "{:.2%}"}),
-                                use_container_width=True, hide_index=True
-                            )
+                            # ANLS-03: Styled allocation breakdown rows (replaces raw dataframe)
+                            st.markdown(_alloc_breakdown(alloc), unsafe_allow_html=True)
                     except Exception as e:
                         st.error(f"Optimization failed: {e}")
