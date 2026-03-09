@@ -1,3 +1,4 @@
+from __future__ import annotations
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
@@ -399,10 +400,15 @@ _token = st.query_params.get("clerk_token")
 if _token and not st.session_state.authenticated:
     _claims = _verify_clerk_token(_token)
     if _claims:
+        _email = _claims.get("email", "").lower()
+        _allowed = [e.lower() for e in st.secrets.get("clerk", {}).get("allowed_emails", "").split(",") if e.strip()]
+        if _allowed and _email not in _allowed:
+            st.error(f"Access denied. {_email} is not an authorized partner.")
+            st.stop()
         st.session_state.authenticated = True
         st.session_state.clerk_user = {
             "name": _claims.get("name", _claims.get("given_name", "Partner")),
-            "email": _claims.get("email", ""),
+            "email": _email,
         }
         st.query_params.clear()   # remove token from URL bar
         st.rerun()
@@ -410,7 +416,8 @@ if _token and not st.session_state.authenticated:
         st.error("Session token is invalid or expired. Please sign in again.")
 
 if not st.session_state.authenticated:
-    st.markdown("""
+    _landing_url = st.secrets.get("clerk", {}).get("landing_url", "http://localhost:3000")
+    st.markdown(f"""
 <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;
             min-height:80vh;text-align:center;">
   <div style="margin-bottom:32px;">
@@ -420,7 +427,7 @@ if not st.session_state.authenticated:
   <div style="color:#9E804B;font-size:13px;letter-spacing:0.04em;margin-bottom:28px;">
     Partner Portal · Private Access
   </div>
-  <a href="https://hgbcapital.vercel.app"
+  <a href="{_landing_url}"
      style="display:inline-block;padding:12px 32px;background:#C5A059;color:#0A0A0A;
             font-weight:600;font-size:14px;letter-spacing:0.04em;border-radius:6px;
             text-decoration:none;">
