@@ -540,6 +540,42 @@ def optimize_portfolio(tickers, strategy, target_return=None):
     performance = ef.portfolio_performance()
     return weights, performance
 
+# --- 3b. PORTFOLIO UI HELPERS ---
+
+# Brand-consistent color palette for Plotly charts
+BRAND_COLORS = [
+    "#C5A059", "#7C9BB5", "#5C8A6E", "#B57C7C",
+    "#9B7CB5", "#B5A57C", "#7CB5B0", "#A07C9B",
+]
+
+# Base Plotly layout applied to every chart
+PLOTLY_DARK_LAYOUT = dict(
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
+    font=dict(color="#F5F5F5", family="Inter, sans-serif", size=12),
+    legend=dict(font=dict(color="#AAAAAA", size=11), bgcolor="rgba(0,0,0,0)"),
+    margin=dict(t=0, b=0, l=0, r=0),
+    height=300,
+)
+
+def _kpi_card(label: str, value: str, delta: str = None, delta_positive: bool = True) -> str:
+    """Return an HTML string for a branded KPI card (PORT-01)."""
+    delta_color = "#16A34A" if delta_positive else "#DC2626"
+    delta_arrow = "▲" if delta_positive else "▼"
+    delta_html = (
+        f'<div style="color:{delta_color};font-size:12px;margin-top:6px;'
+        f'font-variant-numeric:lining-nums tabular-nums;">{delta_arrow} {delta}</div>'
+    ) if delta else '<div style="height:18px;margin-top:6px;"></div>'
+    return f"""
+<div style="background:#111111;border-left:3px solid #C5A059;border-radius:6px;
+            padding:16px 20px;height:100%;box-sizing:border-box;">
+  <div style="color:#9E804B;font-size:11px;letter-spacing:0.08em;
+              text-transform:uppercase;margin-bottom:8px;font-weight:500;">{label}</div>
+  <div style="color:#F5F5F5;font-size:26px;font-weight:600;
+              font-variant-numeric:lining-nums tabular-nums;line-height:1.1;">{value}</div>
+  {delta_html}
+</div>"""
+
 # --- 4. TABS INTERFACE ---
 tab_portfolio, tab_analysis, tab_optimizer = st.tabs(["📊 Portfolio War Room", "🔬 Analysis Lab", "⚙️ Portfolio Optimizer"])
 
@@ -551,29 +587,52 @@ with tab_portfolio:
         if raw_df is not None and not raw_df.empty:
             df_rich, total_equity, total_pl = get_portfolio_performance(raw_df)
             
-            # Scoreboard
+            # PORT-01: Branded KPI cards
+            pl_pct = f"{(total_pl / total_equity) * 100:.2f}%" if pd.notna(total_equity) and total_equity > 0 else "0%"
             c1, c2, c3 = st.columns(3)
-            c1.metric("Total Equity", f"${total_equity:,.2f}")
-            c2.metric("Unrealized P&L", f"${total_pl:,.2f}", delta=f"{(total_pl/total_equity)*100:.2f}%" if pd.notna(total_equity) and total_equity > 0 else "0%")
-            c3.metric("Active Positions", len(df_rich))
+            with c1:
+                st.markdown(_kpi_card("Total Equity", f"${total_equity:,.2f}"), unsafe_allow_html=True)
+            with c2:
+                st.markdown(_kpi_card("Unrealized P&L", f"${total_pl:,.2f}", delta=pl_pct, delta_positive=total_pl >= 0), unsafe_allow_html=True)
+            with c3:
+                st.markdown(_kpi_card("Active Positions", str(len(df_rich))), unsafe_allow_html=True)
             st.caption("Prices reflect previous close via yfinance · Add a CASH row (Shares = dollar balance) to include money market in total")
             st.divider()
-            
-            # SECTOR & HOLDINGS VISUALS
+
+            # PORT-02: Brand-themed Plotly charts
             col_chart1, col_chart2 = st.columns(2)
             with col_chart1:
                 st.write("**Holdings (By Size)**")
-                fig1 = px.pie(df_rich, values='Market Value', names='Ticker', hole=0.4)
-                fig1.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=300)
-                st.plotly_chart(fig1, use_container_width=True)
+                fig1 = px.pie(df_rich, values='Market Value', names='Ticker', hole=0.4,
+                              color_discrete_sequence=BRAND_COLORS)
+                fig1.update_layout(**PLOTLY_DARK_LAYOUT)
+                fig1.update_traces(textfont_color="#F5F5F5")
+                st.plotly_chart(fig1, use_container_width=True, config={"displayModeBar": False})
             with col_chart2:
                 st.write("**Risk Breakdown (By Sector)**")
-                fig2 = px.pie(df_rich, values='Market Value', names='Sector', color_discrete_sequence=px.colors.sequential.RdBu)
-                fig2.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=300)
-                st.plotly_chart(fig2, use_container_width=True)
+                fig2 = px.pie(df_rich, values='Market Value', names='Sector', hole=0.4,
+                              color_discrete_sequence=BRAND_COLORS)
+                fig2.update_layout(**PLOTLY_DARK_LAYOUT)
+                fig2.update_traces(textfont_color="#F5F5F5")
+                st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False})
 
+            # PORT-03: Dark-themed holdings dataframe
             st.write("**Detailed View**")
-            st.dataframe(df_rich[['Ticker', 'Sector', 'Shares', 'Cost', 'Current Price', 'Market Value', 'Return (%)']].style.format({"Cost": "${:.2f}", "Current Price": "${:.2f}", "Market Value": "${:,.2f}", "Return (%)": "{:.1f}%"}), use_container_width=True)
+            cols = ['Ticker', 'Sector', 'Shares', 'Cost', 'Current Price', 'Market Value', 'Return (%)']
+            styled_df = (
+                df_rich[cols].style
+                .format({"Cost": "${:.2f}", "Current Price": "${:.2f}", "Market Value": "${:,.2f}", "Return (%)": "{:.1f}%"})
+                .set_properties(**{"background-color": "#111111", "color": "#F5F5F5", "border-color": "#2A2A2A"})
+                .set_table_styles([
+                    {"selector": "th", "props": [
+                        ("background-color", "#0A0A0A"), ("color", "#9E804B"),
+                        ("font-size", "11px"), ("text-transform", "uppercase"),
+                        ("letter-spacing", "0.06em"), ("border-color", "#2A2A2A"),
+                    ]},
+                    {"selector": "tr:nth-child(even) td", "props": [("background-color", "#161616")]},
+                ])
+            )
+            st.dataframe(styled_df, use_container_width=True)
 
             # Watchlist
             st.divider()
