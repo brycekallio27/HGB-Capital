@@ -4,7 +4,8 @@ import { useAuth } from "@clerk/nextjs";
 import { useEffect, useState } from "react";
 import HGBWordmark from "@/components/HGBWordmark";
 
-const STREAMLIT_URL = "http://localhost:8501";
+// Set NEXT_PUBLIC_STREAMLIT_URL in .env.local (dev) or Vercel env vars (prod)
+const STREAMLIT_URL = process.env.NEXT_PUBLIC_STREAMLIT_URL || "http://localhost:8501";
 
 export default function DashboardPage() {
   const { getToken, isLoaded, isSignedIn } = useAuth();
