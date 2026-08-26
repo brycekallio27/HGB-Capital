@@ -4,8 +4,9 @@ import { useAuth } from "@clerk/nextjs";
 import { useEffect, useState } from "react";
 import HGBWordmark from "@/components/HGBWordmark";
 
-// Set NEXT_PUBLIC_STREAMLIT_URL in .env.local (dev) or Vercel env vars (prod)
+// Set NEXT_PUBLIC_STREAMLIT_URL in .env.local (dev) or Netlify env vars (prod)
 const STREAMLIT_URL = process.env.NEXT_PUBLIC_STREAMLIT_URL || "http://localhost:8501";
+const CLERK_JWT_TEMPLATE = process.env.NEXT_PUBLIC_CLERK_JWT_TEMPLATE || "";
 
 export default function DashboardPage() {
   const { getToken, isLoaded, isSignedIn } = useAuth();
@@ -21,8 +22,11 @@ export default function DashboardPage() {
 
     async function launchDashboard() {
       try {
-        // Get a short-lived Clerk session JWT
-        const token = await getToken();
+        // Get a short-lived Clerk session JWT. If configured, use the HGB
+        // template so Streamlit receives email/partner claims for authorization.
+        const token = await getToken(
+          CLERK_JWT_TEMPLATE ? { template: CLERK_JWT_TEMPLATE } : undefined
+        );
         if (!token) throw new Error("No token returned");
 
         setStatus("redirecting");
