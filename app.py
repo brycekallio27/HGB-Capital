@@ -1,384 +1,121 @@
 from __future__ import annotations
+import re
+import urllib.request
+import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
-import yfinance as yf
-import numpy as np
 import plotly.express as px
-from datetime import datetime, timezone
-from pypfopt import EfficientFrontier, risk_models, expected_returns
-import urllib.request
-import json
+import yfinance as yf
+from pypfopt import EfficientFrontier, expected_returns, risk_models
 
-# ---------------------------------------------------------------------------
-# Clerk JWT verification
-# ---------------------------------------------------------------------------
+# photizo modules — financial logic, CSS, and UI helpers live here
+from photizo.allocation import (
+    PROFILES,
+    SLEEVE_UNIVERSE,
+    optimize_allocation,
+    rebalance_recommendation,
+    universe_tickers,
+)
+from photizo.models import (
+    get_portfolio_performance,
+    get_financial_data,
+    scan_market_opportunities,
+    calculate_dcf,
+    optimize_portfolio,
+    smart_discount_rate,
+)
+from photizo.radar import (
+    RADAR_THEMES,
+    build_radar_universe,
+    parse_ticker_list,
+    scan_radar_candidates,
+)
+from photizo.ui import (
+    BRAND_COLORS,
+    PLOTLY_DARK_LAYOUT,
+    inject_css,
+    kpi_card as _kpi_card,
+    alloc_breakdown as _alloc_breakdown,
+)
+from photizo.sentiment import score_news_items
+from photizo.watchlist import (
+    WATCHLIST_COLUMNS,
+    add_row,
+    annotate_for_display,
+    claim_legacy_rows,
+    delete_row,
+    is_legacy_owner,
+    normalize_watchlist,
+    summary_counts,
+    update_row,
+)
+
 def _verify_clerk_token(token: str) -> dict | None:
-    """Verify a Clerk session JWT using the JWKS endpoint.
-    Returns the decoded claims dict on success, or None on failure.
-    Requires secrets.toml:  [clerk]  jwks_url = "https://..."
-    """
+    """Verify a Clerk session JWT and return claims on success."""
+    if not token:
+        return None
     try:
-        from jwt import PyJWKClient, decode as jwt_decode  # PyJWT[crypto]
-        jwks_url: str = st.secrets["clerk"]["jwks_url"]
+        from jwt import PyJWKClient, decode as jwt_decode
+
+        clerk_cfg = st.secrets.get("clerk", {})
+        jwks_url = clerk_cfg.get("jwks_url", "")
+        issuer = clerk_cfg.get("issuer", None)
+        if not jwks_url:
+            return None
+
         signing_key = PyJWKClient(jwks_url).get_signing_key_from_jwt(token).key
-        claims = jwt_decode(
-            token,
-            signing_key,
-            algorithms=["RS256"],
-            options={"verify_aud": False},
-        )
-        return claims
+        options = {"verify_aud": False}
+        kwargs = {"algorithms": ["RS256"], "options": options}
+        if issuer:
+            kwargs["issuer"] = issuer
+        else:
+            options["verify_iss"] = False
+        return jwt_decode(token, signing_key, **kwargs)
     except Exception:
         return None
 
+
+def _partner_session_from_claims(claims: dict) -> dict | None:
+    """Map verified Clerk claims to an HGB partner session."""
+    email = str(
+        claims.get("email")
+        or claims.get("email_address")
+        or claims.get("primary_email_address")
+        or ""
+    ).strip().lower()
+    if not email:
+        return None
+
+    partners: dict = dict(st.secrets.get("partners", {}))
+    for key, partner in partners.items():
+        partner_email = str(partner.get("email", "")).strip().lower()
+        if partner_email == email:
+            return {
+                "key": str(key).lower(),
+                "name": partner.get("name", key),
+                "email": email,
+            }
+    return None
+
+# ---------------------------------------------------------------------------
+# Ticker Input Validation
+# ---------------------------------------------------------------------------
+def validate_ticker(ticker: str) -> str:
+    """Validate and sanitize ticker input.
+    Strips whitespace, uppercases, and checks against allowed format (1-5 uppercase letters).
+    Raises st.error() and st.stop() on invalid input.
+    """
+    ticker = ticker.strip().upper()
+    if not re.match(r'^[A-Z]{1,5}$', ticker):
+        st.error("Invalid ticker. Enter 1-5 uppercase letters (e.g., AAPL, MSFT).")
+        st.stop()
+    return ticker
+
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Project Photizo", layout="wide")
-
-# --- DESIGN SYSTEM: CSS Constants & Injection ---
-
-DARK_CSS = """
-<style>
-/* Global app background */
-.stApp,
-[data-testid="stAppViewContainer"] {
-    background-color: #0A0A0A !important;
-    color: #F5F5F5;
-}
-
-/* Sidebar surface */
-[data-testid="stSidebar"] {
-    background-color: #111111 !important;
-}
-
-/* Metric values — tabular numerals + gold accent */
-[data-testid="stMetricValue"] {
-    font-variant-numeric: lining-nums tabular-nums;
-    font-feature-settings: "lnum" 1, "tnum" 1;
-    color: #F5F5F5;
-}
-
-/* Metric delta — tabular numerals */
-[data-testid="stMetricDelta"] {
-    font-variant-numeric: lining-nums tabular-nums;
-    font-feature-settings: "lnum" 1, "tnum" 1;
-}
-
-/* DataFrames outer wrapper — tabular numerals (may not penetrate canvas; see Phase 3) */
-[data-testid="stDataFrame"] {
-    font-variant-numeric: lining-nums tabular-nums;
-    font-feature-settings: "lnum" 1, "tnum" 1;
-}
-
-/* Semantic P&L colors — DSYS-05 */
-.pl-positive { color: #16A34A !important; }
-.pl-negative { color: #DC2626 !important; }
-
-/* Gold accent on interactive elements */
-.stButton > button {
-    border-color: #C5A059;
-    color: #C5A059;
-}
-
-/* Semantic P&L delta colors — DSYS-05 */
-[data-testid="stMetricDelta"][aria-label*="increased"],
-[data-testid="stMetricDelta"] svg[class*="up"],
-.stMetricDelta--up {
-    color: #16A34A !important;
-    fill: #16A34A !important;
-}
-[data-testid="stMetricDelta"][aria-label*="decreased"],
-[data-testid="stMetricDelta"] svg[class*="down"],
-.stMetricDelta--down {
-    color: #DC2626 !important;
-    fill: #DC2626 !important;
-}
-[data-testid="stMetricDelta"] > div {
-    font-variant-numeric: lining-nums tabular-nums;
-}
-
-/* ── Phase 2: Global Widget Overrides (DSYS-03) ───────────────────────── */
-
-/* Tabs — gold active underline, no default blue */
-.stTabs [data-baseweb="tab-list"] {
-    background-color: transparent;
-    border-bottom: 1px solid #2A2A2A;
-    gap: 0;
-}
-.stTabs [data-baseweb="tab"] {
-    color: #9E804B;
-    background-color: transparent;
-    padding: 0.5rem 1.25rem;
-    border-bottom: 2px solid transparent;
-}
-.stTabs [aria-selected="true"] {
-    color: #C5A059 !important;
-    border-bottom: 2px solid #C5A059 !important;
-    background-color: transparent !important;
-}
-.stTabs [data-baseweb="tab"]:hover {
-    color: #C5A059;
-    background-color: rgba(197, 160, 89, 0.06);
-}
-.stTabs [data-baseweb="tab-highlight"] {
-    background-color: #C5A059 !important;
-}
-
-/* Buttons — full brand treatment with hover/active states */
-.stButton > button {
-    background-color: transparent;
-    border: 1px solid #C5A059;
-    color: #C5A059;
-    font-weight: 500;
-    letter-spacing: 0.03em;
-    transition: background-color 0.15s ease, box-shadow 0.15s ease;
-}
-.stButton > button:hover {
-    background-color: rgba(197, 160, 89, 0.1) !important;
-    border-color: #C5A059 !important;
-    color: #C5A059 !important;
-    box-shadow: 0 0 0 1px #C5A059;
-}
-.stButton > button:active {
-    background-color: rgba(197, 160, 89, 0.2) !important;
-}
-
-/* Text inputs and text areas */
-[data-testid="stTextInput"] input,
-[data-testid="stTextArea"] textarea {
-    background-color: #1A1A1A !important;
-    border-color: #2A2A2A !important;
-    color: #F5F5F5 !important;
-}
-[data-testid="stTextInput"] input:focus,
-[data-testid="stTextArea"] textarea:focus {
-    border-color: #C5A059 !important;
-    box-shadow: 0 0 0 1px rgba(197, 160, 89, 0.4) !important;
-}
-
-/* Selectbox */
-[data-testid="stSelectbox"] > div > div {
-    background-color: #1A1A1A !important;
-    border-color: #2A2A2A !important;
-}
-
-/* Expander */
-[data-testid="stExpander"] details {
-    border-color: #2A2A2A !important;
-    background-color: #111111 !important;
-}
-
-/* Spinner — gold */
-[data-testid="stSpinner"] svg {
-    stroke: #C5A059 !important;
-}
-
-/* Dividers — subtle, not heavy */
-hr {
-    border-color: #1E1E1E !important;
-    margin: 0.75rem 0 !important;
-}
-
-/* ── Phase 2: Visual Hierarchy (PLSH-01) ──────────────────────────────── */
-
-/* Metric labels — uppercase muted secondary tier */
-[data-testid="stMetricLabel"] {
-    color: #9E804B !important;
-    font-size: 0.7rem !important;
-    font-weight: 500 !important;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-}
-
-/* Captions — tertiary, clearly subordinate */
-.stCaption, [data-testid="stCaption"] p {
-    color: #555555 !important;
-    font-size: 0.75rem !important;
-}
-
-/* Subheaders — gold, intentional */
-[data-testid="stHeadingWithActionElements"] h3,
-h3 {
-    color: #C5A059;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-}
-</style>
-"""
-
-LIGHT_CSS = """
-<style>
-/* Global app background */
-.stApp,
-[data-testid="stAppViewContainer"] {
-    background-color: #FAFAFA !important;
-    color: #1A1A1A;
-}
-
-/* Sidebar surface */
-[data-testid="stSidebar"] {
-    background-color: #FFFFFF !important;
-}
-
-/* Metric values — tabular numerals */
-[data-testid="stMetricValue"] {
-    font-variant-numeric: lining-nums tabular-nums;
-    font-feature-settings: "lnum" 1, "tnum" 1;
-    color: #1A1A1A;
-}
-
-/* Metric delta — tabular numerals */
-[data-testid="stMetricDelta"] {
-    font-variant-numeric: lining-nums tabular-nums;
-    font-feature-settings: "lnum" 1, "tnum" 1;
-}
-
-/* DataFrames outer wrapper — tabular numerals (may not penetrate canvas; see Phase 3) */
-[data-testid="stDataFrame"] {
-    font-variant-numeric: lining-nums tabular-nums;
-    font-feature-settings: "lnum" 1, "tnum" 1;
-}
-
-/* Semantic P&L colors — DSYS-05 */
-.pl-positive { color: #16A34A !important; }
-.pl-negative { color: #DC2626 !important; }
-
-/* Gold accent on interactive elements */
-.stButton > button {
-    border-color: #C5A059;
-    color: #C5A059;
-}
-
-/* Semantic P&L delta colors — DSYS-05 */
-[data-testid="stMetricDelta"][aria-label*="increased"],
-[data-testid="stMetricDelta"] svg[class*="up"],
-.stMetricDelta--up {
-    color: #16A34A !important;
-    fill: #16A34A !important;
-}
-[data-testid="stMetricDelta"][aria-label*="decreased"],
-[data-testid="stMetricDelta"] svg[class*="down"],
-.stMetricDelta--down {
-    color: #DC2626 !important;
-    fill: #DC2626 !important;
-}
-[data-testid="stMetricDelta"] > div {
-    font-variant-numeric: lining-nums tabular-nums;
-}
-
-/* ── Phase 2: Global Widget Overrides (DSYS-03) ───────────────────────── */
-
-/* Tabs — gold active underline */
-.stTabs [data-baseweb="tab-list"] {
-    background-color: transparent;
-    border-bottom: 1px solid #E0E0E0;
-    gap: 0;
-}
-.stTabs [data-baseweb="tab"] {
-    color: #9E9E9E;
-    background-color: transparent;
-    padding: 0.5rem 1.25rem;
-    border-bottom: 2px solid transparent;
-}
-.stTabs [aria-selected="true"] {
-    color: #C5A059 !important;
-    border-bottom: 2px solid #C5A059 !important;
-    background-color: transparent !important;
-}
-.stTabs [data-baseweb="tab"]:hover {
-    color: #C5A059;
-    background-color: rgba(197, 160, 89, 0.06);
-}
-.stTabs [data-baseweb="tab-highlight"] {
-    background-color: #C5A059 !important;
-}
-
-/* Buttons */
-.stButton > button {
-    background-color: transparent;
-    border: 1px solid #C5A059;
-    color: #C5A059;
-    font-weight: 500;
-    letter-spacing: 0.03em;
-    transition: background-color 0.15s ease, box-shadow 0.15s ease;
-}
-.stButton > button:hover {
-    background-color: rgba(197, 160, 89, 0.08) !important;
-    border-color: #C5A059 !important;
-    color: #C5A059 !important;
-    box-shadow: 0 0 0 1px #C5A059;
-}
-.stButton > button:active {
-    background-color: rgba(197, 160, 89, 0.15) !important;
-}
-
-/* Text inputs and text areas */
-[data-testid="stTextInput"] input,
-[data-testid="stTextArea"] textarea {
-    background-color: #FFFFFF !important;
-    border-color: #D0D0D0 !important;
-    color: #1A1A1A !important;
-}
-[data-testid="stTextInput"] input:focus,
-[data-testid="stTextArea"] textarea:focus {
-    border-color: #C5A059 !important;
-    box-shadow: 0 0 0 1px rgba(197, 160, 89, 0.4) !important;
-}
-
-/* Selectbox */
-[data-testid="stSelectbox"] > div > div {
-    background-color: #FFFFFF !important;
-    border-color: #D0D0D0 !important;
-}
-
-/* Expander */
-[data-testid="stExpander"] details {
-    border-color: #E0E0E0 !important;
-    background-color: #FFFFFF !important;
-}
-
-/* Spinner — gold */
-[data-testid="stSpinner"] svg {
-    stroke: #C5A059 !important;
-}
-
-/* Dividers — subtle */
-hr {
-    border-color: #E8E8E8 !important;
-    margin: 0.75rem 0 !important;
-}
-
-/* ── Phase 2: Visual Hierarchy (PLSH-01) ──────────────────────────────── */
-
-/* Metric labels — uppercase muted secondary tier */
-[data-testid="stMetricLabel"] {
-    color: #9E804B !important;
-    font-size: 0.7rem !important;
-    font-weight: 500 !important;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-}
-
-/* Captions — tertiary, clearly subordinate */
-.stCaption, [data-testid="stCaption"] p {
-    color: #888888 !important;
-    font-size: 0.75rem !important;
-}
-
-/* Subheaders — muted gold on light */
-[data-testid="stHeadingWithActionElements"] h3,
-h3 {
-    color: #9E804B;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-}
-</style>
-"""
-
-
-def inject_css(is_dark: bool) -> None:
-    """Inject the appropriate CSS block based on current theme mode."""
-    st.markdown(DARK_CSS if is_dark else LIGHT_CSS, unsafe_allow_html=True)
 
 
 # Initialize theme session state (dark is brand default)
@@ -393,51 +130,245 @@ inject_css(st.session_state.dark_mode)
 # ---------------------------------------------------------------------------
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
-    st.session_state.clerk_user = {"name": "", "email": ""}
+    st.session_state.clerk_user = {"key": "", "name": "", "email": ""}
 
-# Consume ?clerk_token= param on first arrival from the landing page
-_token = st.query_params.get("clerk_token")
-if _token and not st.session_state.authenticated:
-    _claims = _verify_clerk_token(_token)
-    if _claims:
-        _email = _claims.get("email", "").lower()
-        _allowed = [e.lower() for e in st.secrets.get("clerk", {}).get("allowed_emails", "").split(",") if e.strip()]
-        if _allowed and _email not in _allowed:
-            st.error(f"Access denied. {_email} is not an authorized partner.")
-            st.stop()
+_clerk_token = st.query_params.get("clerk_token")
+if _clerk_token and not st.session_state.authenticated:
+    _claims = _verify_clerk_token(_clerk_token)
+    _partner_session = _partner_session_from_claims(_claims or {})
+    if _partner_session:
         st.session_state.authenticated = True
-        st.session_state.clerk_user = {
-            "name": _claims.get("name", _claims.get("given_name", "Partner")),
-            "email": _email,
-        }
-        st.query_params.clear()   # remove token from URL bar
+        st.session_state.clerk_user = _partner_session
+        st.query_params.clear()
         st.rerun()
     else:
-        st.error("Session token is invalid or expired. Please sign in again.")
+        st.query_params.clear()
+        st.error("Clerk sign-in succeeded, but this email is not configured as an HGB partner.")
+        st.stop()
 
 if not st.session_state.authenticated:
     _landing_url = st.secrets.get("clerk", {}).get("landing_url", "http://localhost:3000")
-    st.markdown(f"""
-<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;
-            min-height:80vh;text-align:center;">
-  <div style="margin-bottom:32px;">
-    <div style="color:#C5A059;font-size:42px;font-weight:700;letter-spacing:0.1em;">HGB</div>
-    <div style="color:#9E804B;font-size:11px;letter-spacing:0.2em;text-transform:uppercase;margin-top:4px;">Capital Management</div>
-  </div>
-  <div style="color:#9E804B;font-size:13px;letter-spacing:0.04em;margin-bottom:28px;">
-    Partner Portal · Private Access
-  </div>
-  <a href="{_landing_url}"
-     style="display:inline-block;padding:12px 32px;background:#C5A059;color:#0A0A0A;
-            font-weight:600;font-size:14px;letter-spacing:0.04em;border-radius:6px;
-            text-decoration:none;">
-    Sign In →
-  </a>
-  <div style="color:#3A3A3A;font-size:11px;margin-top:40px;">
-    HGB Capital Management · Confidential
-  </div>
+    # --- Centered HGB header ---
+    st.markdown("""
+<div style="display:flex;flex-direction:column;align-items:center;
+            padding:60px 0 32px 0;text-align:center;">
+  <div style="color:#C5A059;font-size:42px;font-weight:700;
+              letter-spacing:0.1em;line-height:1;">HGB</div>
+  <div style="color:#9E804B;font-size:11px;letter-spacing:0.2em;
+              text-transform:uppercase;margin-top:4px;">Capital Management</div>
+  <div style="color:#9E804B;font-size:13px;letter-spacing:0.04em;
+              margin-top:12px;">Partner Portal · Private Access</div>
 </div>
 """, unsafe_allow_html=True)
+    st.markdown(
+        f"""
+<div style="text-align:center;margin:-10px 0 24px 0;">
+  <a href="{_landing_url}"
+     style="display:inline-block;padding:11px 28px;background:#C5A059;color:#0A0A0A;
+            font-weight:600;font-size:13px;letter-spacing:0.04em;border-radius:6px;
+            text-decoration:none;">
+    Sign In With Clerk →
+  </a>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    # --- Detective animation strip ---
+    st.html("""
+<style>
+@keyframes hgb-det-walk {
+  0%   { transform: translateX(-200px); }
+  100% { transform: translateX(calc(100vw + 200px)); }
+}
+@keyframes hgb-leg-l {
+  0%, 100% { transform: rotate(-26deg); }
+  50%       { transform: rotate(26deg); }
+}
+@keyframes hgb-leg-r {
+  0%, 100% { transform: rotate(26deg); }
+  50%       { transform: rotate(-26deg); }
+}
+@keyframes hgb-arm-l {
+  0%, 100% { transform: rotate(14deg); }
+  50%       { transform: rotate(-14deg); }
+}
+@keyframes hgb-sym-float {
+  0%, 100% { transform: translateY(0px); opacity: 0.65; }
+  50%       { transform: translateY(-11px); opacity: 0.95; }
+}
+@keyframes hgb-sym-glow {
+  0%, 100% { filter: drop-shadow(0 0 4px rgba(197,160,89,0.4)); }
+  50%       { filter: drop-shadow(0 0 14px rgba(197,160,89,0.85)) drop-shadow(0 0 30px rgba(197,160,89,0.3)); }
+}
+@keyframes hgb-mag-sway {
+  0%, 100% { transform: rotate(-6deg); }
+  50%       { transform: rotate(8deg); }
+}
+@keyframes hgb-candle-glow {
+  0%, 100% { opacity: 0.6; }
+  50%       { opacity: 1; }
+}
+.hgb-detective-wrap {
+  position: absolute;
+  bottom: 0px;
+  left: 0;
+  animation: hgb-det-walk 15s linear infinite;
+}
+.hgb-leg-l {
+  transform-box: fill-box;
+  transform-origin: top center;
+  animation: hgb-leg-l 0.6s ease-in-out infinite;
+}
+.hgb-leg-r {
+  transform-box: fill-box;
+  transform-origin: top center;
+  animation: hgb-leg-r 0.6s ease-in-out 0.3s infinite;
+}
+.hgb-arm-l {
+  transform-box: fill-box;
+  transform-origin: top center;
+  animation: hgb-arm-l 0.6s ease-in-out 0.15s infinite;
+}
+.hgb-mag-group {
+  transform-box: fill-box;
+  transform-origin: 84px 48px;
+  animation: hgb-mag-sway 2.8s ease-in-out infinite;
+}
+.hgb-symbol-wrap {
+  position: absolute;
+  animation: hgb-sym-float 3.2s ease-in-out infinite,
+             hgb-sym-glow  3.2s ease-in-out infinite;
+}
+.hgb-candle-svg {
+  position: absolute;
+  animation: hgb-sym-float 3.2s ease-in-out 1.3s infinite,
+             hgb-candle-glow 3.2s ease-in-out 1.3s infinite;
+}
+</style>
+
+<div style="position:relative;width:100%;height:155px;overflow:hidden;
+            margin-bottom:8px;margin-top:-8px;">
+
+  <!-- Floating stock symbols -->
+  <span class="hgb-symbol-wrap"
+        style="left:11%;bottom:52px;font-size:32px;font-weight:700;
+               color:#C5A059;font-family:Georgia,serif;
+               animation-delay:0s,0s;">$</span>
+
+  <span class="hgb-symbol-wrap"
+        style="left:27%;bottom:68px;font-size:26px;font-weight:700;
+               color:#C5A059;font-family:Georgia,serif;
+               animation-delay:0.6s,0.6s;">↑</span>
+
+  <!-- Candlestick chart symbol -->
+  <svg class="hgb-candle-svg"
+       style="left:44%;bottom:36px;width:48px;height:62px;"
+       viewBox="0 0 48 62" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <!-- Candle 1 (bullish, tall) -->
+    <line x1="12" y1="3" x2="12" y2="11" stroke="#C5A059" stroke-width="2" stroke-linecap="round"/>
+    <rect x="6" y="11" width="12" height="28" rx="1.5" fill="#C5A059"/>
+    <line x1="12" y1="39" x2="12" y2="48" stroke="#C5A059" stroke-width="2" stroke-linecap="round"/>
+    <!-- Candle 2 (bearish, hollow) -->
+    <line x1="36" y1="5" x2="36" y2="13" stroke="#9E804B" stroke-width="2" stroke-linecap="round"/>
+    <rect x="30" y="13" width="12" height="22" rx="1.5" fill="none" stroke="#9E804B" stroke-width="1.8"/>
+    <line x1="36" y1="35" x2="36" y2="44" stroke="#9E804B" stroke-width="2" stroke-linecap="round"/>
+  </svg>
+
+  <span class="hgb-symbol-wrap"
+        style="left:61%;bottom:58px;font-size:28px;font-weight:700;
+               color:#C5A059;font-family:Georgia,serif;
+               animation-delay:1.9s,1.9s;">%</span>
+
+  <span class="hgb-symbol-wrap"
+        style="left:78%;bottom:46px;font-size:22px;font-weight:700;
+               color:#9E804B;font-family:Georgia,serif;letter-spacing:-1px;
+               animation-delay:2.7s,2.7s;">≈</span>
+
+  <!-- Horizontal ground line -->
+  <div style="position:absolute;bottom:1px;left:0;right:0;
+              height:1px;background:linear-gradient(90deg,
+              transparent 0%, rgba(197,160,89,0.18) 15%,
+              rgba(197,160,89,0.18) 85%, transparent 100%);"></div>
+
+  <!-- Detective SVG figure -->
+  <svg class="hgb-detective-wrap"
+       viewBox="0 0 130 158" width="94" height="120"
+       fill="none" xmlns="http://www.w3.org/2000/svg">
+
+    <!-- FEDORA HAT -->
+    <ellipse cx="54" cy="18" rx="28" ry="8" fill="#9E804B"/>
+    <path d="M 30 22 Q 30 1 54 1 Q 78 1 78 22 Z" fill="#9E804B"/>
+    <rect x="30" y="18" width="48" height="4" rx="2" fill="#7A6238"/>
+    <!-- Hat ribbon -->
+    <rect x="30" y="17" width="48" height="2.5" rx="1.2" fill="#5C4B28"/>
+
+    <!-- HEAD -->
+    <circle cx="54" cy="38" r="15" fill="#C5A059"/>
+    <!-- Profile ear -->
+    <ellipse cx="67" cy="38" rx="3.5" ry="6" fill="#B08040"/>
+
+    <!-- NECK -->
+    <rect x="49" y="51" width="10" height="8" rx="3" fill="#C5A059"/>
+
+    <!-- TRENCH COAT BODY -->
+    <path d="M 26 56 L 16 116 L 40 116 L 54 88 L 68 116 L 92 116 L 82 56 Z"
+          fill="#C5A059"/>
+    <!-- Coat shading / lapels -->
+    <path d="M 54 56 L 40 72 L 54 68 L 68 72 Z" fill="#B08040"/>
+    <!-- Center button line -->
+    <line x1="54" y1="70" x2="54" y2="116" stroke="#B08040" stroke-width="1.5"/>
+    <!-- Belt -->
+    <rect x="22" y="86" width="60" height="6" rx="3" fill="#B08040"/>
+    <rect x="49" y="84" width="10" height="10" rx="2.5" fill="#9E804B"/>
+
+    <!-- LEFT ARM (swings with walk) -->
+    <g class="hgb-arm-l">
+      <rect x="12" y="58" width="12" height="44" rx="5.5" fill="#C5A059"/>
+      <circle cx="18" cy="104" r="6.5" fill="#C5A059"/>
+    </g>
+
+    <!-- RIGHT ARM + MAGNIFYING GLASS -->
+    <g class="hgb-mag-group">
+      <!-- Arm angled up-right toward glass -->
+      <rect x="82" y="52" width="12" height="38" rx="5.5" fill="#C5A059"
+            transform="rotate(-32 88 52)"/>
+      <!-- Magnifying glass loop -->
+      <circle cx="102" cy="34" r="18" fill="none"
+              stroke="#C5A059" stroke-width="3.2"/>
+      <!-- Lens tint -->
+      <circle cx="102" cy="34" r="15" fill="rgba(197,160,89,0.08)"/>
+      <!-- Lens glint -->
+      <path d="M 92 24 Q 96 20 100 24"
+            stroke="rgba(197,160,89,0.55)" stroke-width="1.8"
+            fill="none" stroke-linecap="round"/>
+      <!-- Handle -->
+      <line x1="115" y1="47" x2="127" y2="61"
+            stroke="#C5A059" stroke-width="4.5" stroke-linecap="round"/>
+    </g>
+
+    <!-- LEFT LEG -->
+    <g class="hgb-leg-l">
+      <rect x="30" y="114" width="15" height="42" rx="6.5" fill="#B08040"/>
+      <ellipse cx="37" cy="156" rx="12" ry="5.5" fill="#7A5A18"/>
+    </g>
+
+    <!-- RIGHT LEG -->
+    <g class="hgb-leg-r">
+      <rect x="59" y="114" width="15" height="42" rx="6.5" fill="#B08040"/>
+      <ellipse cx="67" cy="156" rx="12" ry="5.5" fill="#7A5A18"/>
+    </g>
+
+  </svg>
+
+</div>
+""")
+
+    st.markdown(
+        "<div style='text-align:center;color:#2A2A2A;font-size:11px;margin-top:32px;'>"
+        "HGB Capital Management · Confidential</div>",
+        unsafe_allow_html=True,
+    )
     st.stop()
 
 st.title("Project Photizo | Investment Engine")
@@ -466,6 +397,7 @@ st.sidebar.markdown("""
 """, unsafe_allow_html=True)
 
 # SBAR-02: Partner session identity — now pulled from Clerk JWT
+partner_key = st.session_state.clerk_user.get("key", "")
 user = st.session_state.clerk_user.get("name", "Partner")
 user_email = st.session_state.clerk_user.get("email", "")
 st.sidebar.markdown(f"""
@@ -482,7 +414,7 @@ st.sidebar.markdown(f"""
 
 def _sign_out():
     st.session_state.authenticated = False
-    st.session_state.clerk_user = {"name": "", "email": ""}
+    st.session_state.clerk_user = {"key": "", "name": "", "email": ""}
 
 st.sidebar.button("Sign Out", on_click=_sign_out, use_container_width=True)
 
@@ -520,7 +452,6 @@ def get_portfolio_performance(df):
     if equity_tickers:
         try:
             close_data = yf.download(equity_tickers, period="1d", progress=False)['Close']
-            ticker_objects = {t: yf.Ticker(t) for t in equity_tickers}
         except Exception as e:
             return df, 0, 0
 
@@ -534,9 +465,18 @@ def get_portfolio_performance(df):
 
         current_prices = close_data.iloc[-1]
         df.loc[~cash_mask, 'Current Price'] = df.loc[~cash_mask, 'Ticker'].map(current_prices)
-        df.loc[~cash_mask, 'Sector'] = df.loc[~cash_mask, 'Ticker'].apply(
-            lambda t: ticker_objects[t].info.get('sector', 'Unknown') if t in ticker_objects else 'Unknown'
-        )
+
+        # Parallelize ticker info fetches using ThreadPoolExecutor
+        def _get_sector(ticker):
+            try:
+                return yf.Ticker(ticker).info.get('sector', 'Unknown')
+            except Exception:
+                return 'Unknown'
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            sector_map = dict(zip(equity_tickers, executor.map(_get_sector, equity_tickers)))
+
+        df.loc[~cash_mask, 'Sector'] = df.loc[~cash_mask, 'Ticker'].map(sector_map)
 
     # Metrics
     df['Market Value'] = df['Shares'] * df['Current Price']
@@ -549,6 +489,160 @@ def get_portfolio_performance(df):
     total_pl = df['Unrealized Gain ($)'].fillna(0).sum()
 
     return df, total_equity, total_pl
+
+@st.cache_data(ttl=300)
+def get_portfolio_df():
+    """Fetch Portfolio DataFrame from Google Sheets once and cache it."""
+    try:
+        return conn.read(worksheet="Portfolio", ttl=5)
+    except Exception:
+        return None
+
+
+def get_watchlist_df() -> pd.DataFrame:
+    """Read and normalize the shared Watchlist worksheet."""
+    try:
+        return normalize_watchlist(conn.read(worksheet="Watchlist", ttl=5))
+    except Exception:
+        return normalize_watchlist(None)
+
+
+def update_watchlist_df(df: pd.DataFrame) -> None:
+    """Persist the canonical Watchlist schema to Google Sheets."""
+    conn.update(worksheet="Watchlist", data=normalize_watchlist(df)[WATCHLIST_COLUMNS])
+
+
+def partner_name_lookup() -> dict:
+    """Build partner_key -> display name from Streamlit secrets."""
+    partners = st.secrets.get("partners", {})
+    return {str(k).lower(): v.get("name", k) for k, v in partners.items()}
+
+
+@st.cache_data(ttl=300)
+def get_allocation_prices(tickers: tuple[str, ...]) -> pd.DataFrame:
+    """Download two years of prices for the allocation decision engine."""
+    prices = yf.download(list(tickers), period="2y", progress=False)["Close"]
+    if isinstance(prices, pd.Series):
+        prices = prices.to_frame(name=tickers[0])
+    return prices.dropna(axis=1, how="all").ffill().dropna()
+
+
+def current_portfolio_weights(df_rich: pd.DataFrame | None) -> dict[str, float]:
+    """Convert enriched holdings to ticker weights for rebalance comparison."""
+    if df_rich is None or df_rich.empty or "Market Value" not in df_rich.columns:
+        return {}
+    total = float(df_rich["Market Value"].fillna(0).sum())
+    if total <= 0:
+        return {}
+    return {
+        str(row["Ticker"]).upper(): float(row["Market Value"]) / total
+        for _, row in df_rich.iterrows()
+        if float(row.get("Market Value", 0) or 0) > 0
+    }
+
+
+def allocation_news_summary(tickers: list[str], max_tickers: int = 8) -> pd.DataFrame:
+    """Cross-reference allocation candidates with available headline sentiment."""
+    rows = []
+    for ticker in tickers[:max_tickers]:
+        data = get_financial_data(ticker)
+        news = data.get("News", []) if data else []
+        sentiment = score_news_items(news)
+        rows.append({
+            "Ticker": ticker,
+            "Sentiment": sentiment["label"].replace("_", " ").title(),
+            "Score": sentiment["score"],
+            "Items": sentiment["n_items"],
+            "Risk Flags": ", ".join(sentiment["risks"]) if sentiment["risks"] else "",
+        })
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=300)
+def run_filtered_market_radar(
+    tickers: tuple[str, ...],
+    min_discount_pct: float,
+    max_pe: float | None,
+    min_growth_pct: float | None,
+    selected_sectors: tuple[str, ...],
+    max_results: int,
+) -> pd.DataFrame:
+    """Cached wrapper for the thesis-driven radar scan."""
+    return scan_radar_candidates(
+        list(tickers),
+        min_discount_pct=min_discount_pct,
+        max_pe=max_pe,
+        min_growth_pct=min_growth_pct,
+        selected_sectors=list(selected_sectors),
+        max_results=max_results,
+    )
+
+# ---------------------------------------------------------------------------
+# News aggregation helpers — Google News RSS + SEC EDGAR filings
+# ---------------------------------------------------------------------------
+
+def _fetch_google_news_rss(ticker: str, max_items: int = 5) -> list[dict]:
+    """Pull recent headlines from Google News RSS for a given ticker symbol."""
+    url = f"https://news.google.com/rss/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            raw = resp.read()
+        root = ET.fromstring(raw)
+        items: list[dict] = []
+        for item in root.findall(".//item")[:max_items]:
+            title = item.findtext("title", "").strip()
+            if not title:
+                continue
+            link = item.findtext("link", "#").strip()
+            pub_date = item.findtext("pubDate", "").strip()
+            source_el = item.find("source")
+            source = source_el.text.strip() if source_el is not None and source_el.text else "Google News"
+            items.append({
+                "title": title,
+                "link": link,
+                "publisher": source,
+                "pub_date": pub_date,
+                "source_type": "google_news",
+            })
+        return items
+    except Exception:
+        return []
+
+
+def _fetch_sec_filings(ticker: str, max_items: int = 3) -> list[dict]:
+    """Pull recent SEC 8-K filings for a ticker via EDGAR Atom feed."""
+    url = (
+        f"https://www.sec.gov/cgi-bin/browse-edgar"
+        f"?action=getcompany&CIK={ticker}&type=8-K"
+        f"&dateb=&owner=include&count={max_items}&search_text=&output=atom"
+    )
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "HGB Capital research@hgbcapital.com"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw = resp.read()
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        root = ET.fromstring(raw)
+        items: list[dict] = []
+        for entry in root.findall("atom:entry", ns)[:max_items]:
+            title = entry.findtext("atom:title", "", ns).strip()
+            link_el = entry.find("atom:link", ns)
+            link = link_el.get("href", "#") if link_el is not None else "#"
+            updated = entry.findtext("atom:updated", "", ns).strip()
+            items.append({
+                "title": f"📋 SEC 8-K: {title}",
+                "link": link,
+                "publisher": "SEC EDGAR",
+                "pub_date": updated,
+                "source_type": "sec_edgar",
+            })
+        return items
+    except Exception:
+        return []
+
 
 @st.cache_data(ttl=300)
 def get_financial_data(ticker):
@@ -569,10 +663,11 @@ def get_financial_data(ticker):
             except KeyError:
                 fcf = 0
         
-        analyst_growth = info.get('earningsGrowth', 0.10)
-        if analyst_growth is None: analyst_growth = 0.08
-        if analyst_growth > 0.20: analyst_growth = 0.20 
-        if analyst_growth < 0: analyst_growth = 0.02 
+        raw_analyst_growth = info.get('earningsGrowth', 0.10)
+        if raw_analyst_growth is None: raw_analyst_growth = 0.08
+        analyst_growth = raw_analyst_growth
+        if analyst_growth > 0.20: analyst_growth = 0.20
+        if analyst_growth < 0: analyst_growth = 0.02
         
         # History for charts
         fin = stock.financials
@@ -584,11 +679,31 @@ def get_financial_data(ticker):
                 history['Net Income ($B)'] = transposed['Net Income'] / 1e9
                 history.index = history.index.strftime('%Y')
 
-        news = []
+        # yfinance news — normalized to a common dict schema
+        yf_news: list[dict] = []
         try:
-            news = stock.news[:3]
+            for item in stock.news[:4]:
+                content = item.get("content", {})
+                title = content.get("title", "")
+                if not title:
+                    continue
+                link = content.get("canonicalUrl", {}).get("url", "#")
+                publisher = content.get("provider", {}).get("displayName", "Yahoo Finance")
+                pub_date = content.get("pubDate", "")
+                yf_news.append({
+                    "title": title,
+                    "link": link,
+                    "publisher": publisher,
+                    "pub_date": pub_date,
+                    "source_type": "yfinance",
+                })
         except Exception:
             pass
+
+        # Aggregate from all sources: yfinance + Google News + SEC EDGAR
+        google_news = _fetch_google_news_rss(ticker, max_items=4)
+        sec_filings = _fetch_sec_filings(ticker, max_items=2)
+        aggregated_news = yf_news + google_news + sec_filings
 
         return {
             "Price": info.get('currentPrice', 0),
@@ -596,9 +711,10 @@ def get_financial_data(ticker):
             "Beta": info.get('beta', 1.0),
             "FCF": fcf,
             "Analyst_Growth": analyst_growth,
+            "Raw_Analyst_Growth": raw_analyst_growth,
             "Name": info.get('shortName', ticker),
             "History": history,
-            "News": news
+            "News": aggregated_news,
         }
     except Exception as e:
         return None
@@ -664,7 +780,7 @@ PLOTLY_DARK_LAYOUT = dict(
     height=300,
 )
 
-def _kpi_card(label: str, value: str, delta: str = None, delta_positive: bool = True) -> str:
+def _kpi_card(label: str, value: str, delta: str = None, delta_positive: bool = True, value_color: str = "#F5F5F5") -> str:
     """Return an HTML string for a branded KPI card (PORT-01)."""
     delta_color = "#16A34A" if delta_positive else "#DC2626"
     delta_arrow = "▲" if delta_positive else "▼"
@@ -677,7 +793,7 @@ def _kpi_card(label: str, value: str, delta: str = None, delta_positive: bool = 
             padding:16px 20px;height:100%;box-sizing:border-box;">
   <div style="color:#9E804B;font-size:11px;letter-spacing:0.08em;
               text-transform:uppercase;margin-bottom:8px;font-weight:500;">{label}</div>
-  <div style="color:#F5F5F5;font-size:26px;font-weight:600;
+  <div style="color:{value_color};font-size:26px;font-weight:600;
               font-variant-numeric:lining-nums tabular-nums;line-height:1.1;">{value}</div>
   {delta_html}
 </div>"""
@@ -706,14 +822,28 @@ def _alloc_breakdown(weights_dict: dict) -> str:
   {rows}
 </div>"""
 
-# --- 4. TABS INTERFACE ---
-tab_portfolio, tab_analysis, tab_optimizer = st.tabs(["📊 Portfolio War Room", "🔬 Analysis Lab", "⚙️ Portfolio Optimizer"])
+# --- 4. PERSISTENT WORKSPACE NAVIGATION ---
+workspace_options = [
+    "Portfolio War Room",
+    "Analysis Lab",
+    "Allocation Dashboard",
+]
+if "active_workspace" not in st.session_state:
+    st.session_state.active_workspace = workspace_options[0]
+
+active_workspace = st.radio(
+    "Workspace",
+    workspace_options,
+    horizontal=True,
+    key="active_workspace",
+    label_visibility="collapsed",
+)
 
 # --- TAB 1: PORTFOLIO ---
-with tab_portfolio:
+if active_workspace == "Portfolio War Room":
     st.subheader("HGB Capital | Live Holdings")
     try:
-        raw_df = conn.read(worksheet="Portfolio", ttl=5)
+        raw_df = get_portfolio_df()
         if raw_df is not None and not raw_df.empty:
             df_rich, total_equity, total_pl = get_portfolio_performance(raw_df)
             
@@ -766,10 +896,146 @@ with tab_portfolio:
 
             # Watchlist
             st.divider()
-            st.subheader("🎯 Watchlist Targets")
+            st.subheader("Team Watchlist")
             try:
-                df_watch = conn.read(worksheet="Watchlist", ttl=5)
-                if not df_watch.empty: st.dataframe(df_watch.sort_index(ascending=False), use_container_width=True, hide_index=True)
+                df_watch = get_watchlist_df()
+                names = partner_name_lookup()
+                counts = summary_counts(df_watch, names.keys())
+                if counts:
+                    count_cols = st.columns(min(len(counts), 4))
+                    for idx, (member_key, member_counts) in enumerate(counts.items()):
+                        with count_cols[idx % len(count_cols)]:
+                            st.markdown(
+                                _kpi_card(
+                                    names.get(member_key, member_key),
+                                    f"{member_counts['owned']} saved",
+                                    delta=f"{member_counts['starred']} starred",
+                                ),
+                                unsafe_allow_html=True,
+                            )
+
+                if df_watch.empty:
+                    st.caption("No shared watchlist entries yet.")
+                else:
+                    display_df = annotate_for_display(df_watch, partner_key, names)
+                    display_df.insert(0, "Row", display_df.index)
+                    visible_cols = [
+                        "Row", "★", "Ticker", "Owner", "You?", "Price_At_Add",
+                        "Status", "Notes", "Added_At",
+                    ]
+                    st.dataframe(
+                        display_df[visible_cols].sort_values("Row", ascending=False),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    legacy_rows = [
+                        int(i)
+                        for i, row in df_watch.iterrows()
+                        if is_legacy_owner(row, names.keys())
+                    ]
+                    if legacy_rows:
+                        st.warning(
+                            f"{len(legacy_rows)} legacy test watchlist entr"
+                            f"{'y' if len(legacy_rows) == 1 else 'ies'} need an owner."
+                        )
+                        claim_col, delete_col = st.columns(2)
+                        with claim_col:
+                            if st.button("Claim Legacy Entries", use_container_width=True):
+                                updated, claimed = claim_legacy_rows(
+                                    df_watch,
+                                    row_indices=legacy_rows,
+                                    partner_key=partner_key,
+                                    valid_partner_keys=names.keys(),
+                                )
+                                update_watchlist_df(updated)
+                                st.cache_data.clear()
+                                st.success(f"Claimed {claimed} legacy entries.")
+                                st.rerun()
+                        with delete_col:
+                            if st.button("Delete Legacy Entries", use_container_width=True):
+                                updated = df_watch.drop(df_watch.index[legacy_rows]).reset_index(drop=True)
+                                update_watchlist_df(updated)
+                                st.cache_data.clear()
+                                st.success(f"Deleted {len(legacy_rows)} legacy entries.")
+                                st.rerun()
+
+                    st.caption("Everyone can view and star ideas. Only the partner who added an idea can edit or delete it.")
+                    row_options = display_df["Row"].tolist()
+                    selected_row = st.selectbox(
+                        "Manage watchlist row",
+                        options=row_options,
+                        format_func=lambda i: f"{display_df.loc[i, 'Ticker']} · {display_df.loc[i, 'Owner']}",
+                    )
+                    selected = df_watch.iloc[int(selected_row)]
+                    c_star, c_status, c_notes, c_delete = st.columns([1, 1, 2, 1])
+                    with c_star:
+                        if st.button("Toggle Star", key=f"star_{selected_row}"):
+                            updated, ok, msg = update_row(
+                                df_watch,
+                                row_index=int(selected_row),
+                                partner_key=partner_key,
+                                updates={"_star_toggle": True},
+                            )
+                            if ok:
+                                update_watchlist_df(updated)
+                                st.cache_data.clear()
+                                st.success(msg)
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                    with c_status:
+                        new_status = st.selectbox(
+                            "Status",
+                            ["Watching", "Researching", "Buy", "Sell", "Closed"],
+                            index=["Watching", "Researching", "Buy", "Sell", "Closed"].index(
+                                selected.get("Status", "Watching")
+                                if selected.get("Status", "Watching") in ["Watching", "Researching", "Buy", "Sell", "Closed"]
+                                else "Watching"
+                            ),
+                            disabled=str(selected.get("Added_By", "")).lower() != partner_key.lower(),
+                            key=f"status_{selected_row}",
+                        )
+                    with c_notes:
+                        new_notes = st.text_input(
+                            "Notes",
+                            value=str(selected.get("Notes", "") or ""),
+                            disabled=str(selected.get("Added_By", "")).lower() != partner_key.lower(),
+                            key=f"notes_{selected_row}",
+                        )
+                    with c_delete:
+                        st.write("")
+                        st.write("")
+                        save_edit = st.button("Save", key=f"save_{selected_row}")
+                        delete_edit = st.button("Delete", key=f"delete_{selected_row}")
+
+                    if save_edit:
+                        updated, ok, msg = update_row(
+                            df_watch,
+                            row_index=int(selected_row),
+                            partner_key=partner_key,
+                            updates={"Status": new_status, "Notes": new_notes},
+                        )
+                        if ok:
+                            update_watchlist_df(updated)
+                            st.cache_data.clear()
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                    if delete_edit:
+                        updated, ok, msg = delete_row(
+                            df_watch,
+                            row_index=int(selected_row),
+                            partner_key=partner_key,
+                        )
+                        if ok:
+                            update_watchlist_df(updated)
+                            st.cache_data.clear()
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
             except Exception as e:
                 st.caption(f"Watchlist unavailable: {e}")
         else: st.info("Portfolio is empty. Add positions to Google Sheets.")
@@ -778,13 +1044,158 @@ with tab_portfolio:
     if st.button("Refresh Portfolio"): st.cache_data.clear(); st.rerun()
 
 # --- TAB 2: ANALYSIS LAB ---
-with tab_analysis:
-    with st.expander("📡 Market Radar (Scan for Opportunities)", expanded=False):
-        if st.button("Scan Market"):
+if active_workspace == "Analysis Lab":
+    if "market_radar_expanded" not in st.session_state:
+        st.session_state.market_radar_expanded = False
+    if "market_radar_results" not in st.session_state:
+        st.session_state.market_radar_results = None
+
+    with st.expander(
+        "Market Radar (Filtered Opportunity Scan)",
+        expanded=st.session_state.market_radar_expanded,
+    ):
+        st.caption("Start with a thesis, anchor company, or theme, then filter candidates before adding ideas to the team watchlist.")
+
+        radar_left, radar_right = st.columns([1, 1])
+        with radar_left:
+            selected_theme_keys = st.multiselect(
+                "Investment themes",
+                options=list(RADAR_THEMES.keys()),
+                default=["ai_compute"],
+                format_func=lambda k: RADAR_THEMES[k].label,
+                help="Theme baskets include related companies and ETFs. You can combine themes.",
+            )
+            anchor_ticker = st.text_input(
+                "Anchor ticker",
+                placeholder="NVDA, LLY, TSM...",
+                help="Use a large-cap anchor to pull in related ecosystem names.",
+            ).strip().upper()
+            custom_ticker_text = st.text_area(
+                "Custom tickers",
+                placeholder="One per line or comma-separated",
+                height=88,
+            )
+
+        with radar_right:
+            sector_filter = st.multiselect(
+                "Sector filter",
+                [
+                    "Technology",
+                    "Healthcare",
+                    "Industrials",
+                    "Communication Services",
+                    "Consumer Cyclical",
+                    "Financial Services",
+                    "Energy",
+                    "ETF / Fund",
+                ],
+            )
+            min_discount_pct = st.slider(
+                "Minimum discount from 52-week high",
+                0,
+                50,
+                0,
+                5,
+                format="%d%%",
+            )
+            max_pe_enabled = st.checkbox("Filter by max P/E", value=False)
+            max_pe = st.slider("Maximum P/E", 5, 80, 35, 5) if max_pe_enabled else None
+            min_growth_enabled = st.checkbox("Filter by minimum earnings growth", value=False)
+            min_growth_pct = st.slider("Minimum earnings growth", -25, 60, 0, 5, format="%d%%") if min_growth_enabled else None
+            max_results = st.slider("Max results", 5, 40, 20, 5)
+
+        custom_tickers = parse_ticker_list(custom_ticker_text)
+        invalid_custom = [t for t in custom_tickers if not re.match(r"^[A-Z]{1,5}$", t)]
+        if invalid_custom:
+            st.warning(f"Skipping unsupported ticker format: {', '.join(invalid_custom)}")
+        custom_tickers = [t for t in custom_tickers if re.match(r"^[A-Z]{1,5}$", t)]
+        if anchor_ticker and not re.match(r"^[A-Z]{1,5}$", anchor_ticker):
+            st.warning("Anchor ticker must be 1-5 letters. Ignoring anchor for this scan.")
+            anchor_ticker = ""
+
+        radar_universe = build_radar_universe(
+            theme_keys=selected_theme_keys,
+            anchor_ticker=anchor_ticker,
+            custom_tickers=custom_tickers,
+        )
+        st.caption(f"Candidate universe: {len(radar_universe)} ticker(s) · {', '.join(radar_universe[:18])}{'...' if len(radar_universe) > 18 else ''}")
+
+        if st.button("Scan Filtered Market", use_container_width=True):
             with st.spinner("Scanning Titans..."):
-                opps = scan_market_opportunities()
-                if not opps.empty: st.dataframe(opps, use_container_width=True)
-                else: st.info("No obvious discounts found.")
+                st.session_state.market_radar_results = run_filtered_market_radar(
+                    tuple(radar_universe),
+                    float(min_discount_pct),
+                    float(max_pe) if max_pe is not None else None,
+                    float(min_growth_pct) if min_growth_pct is not None else None,
+                    tuple(sector_filter),
+                    int(max_results),
+                )
+                st.session_state.market_radar_expanded = True
+                st.rerun()
+
+        opps = st.session_state.market_radar_results
+        if opps is not None:
+            if not opps.empty:
+                display_opps = opps.copy()
+
+                # Coerce numeric columns — yfinance occasionally returns
+                # non-numeric junk (e.g. "Infinity", None) which breaks the
+                # Styler's {:.1f} formatter. errors="coerce" converts any
+                # offending value to NaN so na_rep="--" handles it cleanly.
+                _numeric_cols = [
+                    "Price", "52W Discount", "P/E", "Forward P/E",
+                    "Earnings Growth", "Beta", "Market Cap", "Radar Score",
+                ]
+                for _col in _numeric_cols:
+                    if _col in display_opps.columns:
+                        display_opps[_col] = pd.to_numeric(
+                            display_opps[_col], errors="coerce"
+                        )
+
+                st.dataframe(
+                    display_opps.style.format({
+                        "Price": "${:.2f}",
+                        "52W Discount": "{:.1f}%",
+                        "P/E": "{:.1f}",
+                        "Forward P/E": "{:.1f}",
+                        "Earnings Growth": "{:.1f}%",
+                        "Beta": "{:.2f}",
+                        "Market Cap": "${:,.0f}",
+                        "Radar Score": "{:.1f}",
+                    }, na_rep="--"),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                selected_radar_ticker = st.selectbox(
+                    "Add radar candidate to team watchlist",
+                    options=display_opps["Ticker"].tolist(),
+                    format_func=lambda t: f"{t} · {display_opps.loc[display_opps['Ticker'] == t, 'Company'].iloc[0]}",
+                )
+                radar_notes = st.text_input(
+                    "Radar thesis note",
+                    value=f"Radar thesis: {anchor_ticker or RADAR_THEMES[selected_theme_keys[0]].label if selected_theme_keys else 'custom scan'}",
+                )
+                if st.button("Add Radar Candidate", use_container_width=True):
+                    row = display_opps.loc[display_opps["Ticker"] == selected_radar_ticker].iloc[0]
+                    try:
+                        curr = get_watchlist_df()
+                        updated = add_row(
+                            curr,
+                            ticker=selected_radar_ticker,
+                            price_at_add=float(row.get("Price", 0) or 0),
+                            partner_key=partner_key,
+                            added_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                            notes=radar_notes,
+                            status="Researching",
+                        )
+                        update_watchlist_df(updated)
+                        st.cache_data.clear()
+                        st.success(f"Added {selected_radar_ticker} to the team watchlist.")
+                    except Exception as e:
+                        st.error(f"Error syncing to Sheets: {e}")
+            else:
+                st.info("No candidates matched those filters. Try widening discount, P/E, growth, or sector filters.")
 
     # ANLS-01: Structured card layout for controls
     st.markdown("""
@@ -799,6 +1210,7 @@ with tab_analysis:
         ticker_input = st.text_input("Ticker", label_visibility="collapsed", placeholder="e.g. NVDA").upper()
 
     if ticker_input:
+        ticker_input = validate_ticker(ticker_input)
         data = get_financial_data(ticker_input)
         if data:
             # ANLS-01: Assumption sliders in labelled card
@@ -815,6 +1227,21 @@ with tab_analysis:
             upside = ((intrinsic_value - data['Price']) / data['Price']) * 100
             upside_color = "#16A34A" if upside >= 0 else "#DC2626"
             upside_arrow = "▲" if upside >= 0 else "▼"
+
+            # FCF / growth health warnings
+            if data['FCF'] < 0:
+                st.warning(
+                    f"⚠️ **Negative Free Cash Flow**: {data['Name']} reported "
+                    f"negative FCF (${data['FCF']/1e9:.2f}B TTM). The DCF model projects "
+                    f"this forward — treat the intrinsic value as highly speculative "
+                    f"until FCF turns positive."
+                )
+            if data.get('Raw_Analyst_Growth', 0) < 0:
+                st.info(
+                    f"ℹ️ Analyst consensus growth is negative "
+                    f"({data['Raw_Analyst_Growth']:.1%}). "
+                    f"Growth rate has been floored at 2% for modeling purposes."
+                )
 
             # ANLS-02: DCF result hero card + supporting KPI cards
             st.markdown(f"""
@@ -834,7 +1261,10 @@ with tab_analysis:
             with k1:
                 st.markdown(_kpi_card("Market Price", f"${data['Price']}"), unsafe_allow_html=True)
             with k2:
-                st.markdown(_kpi_card("Free Cash Flow", f"${data['FCF']/1e9:.2f}B"), unsafe_allow_html=True)
+                fcf_val = data['FCF']
+                fcf_display = f"-${abs(fcf_val)/1e9:.2f}B" if fcf_val < 0 else f"${fcf_val/1e9:.2f}B"
+                fcf_color = "#DC2626" if fcf_val < 0 else "#F5F5F5"
+                st.markdown(_kpi_card("Free Cash Flow", fcf_display, value_color=fcf_color), unsafe_allow_html=True)
             with k3:
                 st.markdown(_kpi_card("Beta", f"{data['Beta']:.2f}"), unsafe_allow_html=True)
 
@@ -851,22 +1281,52 @@ with tab_analysis:
                     st.caption("No historical data available.")
 
             with tab_news:
+                # Source-type badge colours
+                _SOURCE_BADGE = {
+                    "yfinance":   ("📰", "#2A2A2A", "#C5A059"),
+                    "google_news": ("🌐", "#1A2A1A", "#4ADE80"),
+                    "sec_edgar":  ("🏛️", "#1A1A2A", "#818CF8"),
+                }
+
                 st.write(f"**Latest News for {data['Name']}**")
+                st.caption(
+                    f"Sources: Yahoo Finance · Google News · SEC EDGAR  |  "
+                    f"{len(data['News'])} article(s) loaded"
+                )
+
                 if data['News']:
                     for news_item in data['News']:
-                        content = news_item.get('content', {})
-                        title = content.get('title')
-                        if not title: continue
-                        link = content.get('canonicalUrl', {}).get('url', '#')
-                        publisher = content.get('provider', {}).get('displayName', 'Unknown')
-                        pub_date_str = content.get('pubDate', '')
-                        try:
-                            pub_dt = datetime.fromisoformat(pub_date_str.replace('Z', '+00:00'))
-                            pub_formatted = pub_dt.astimezone().strftime('%Y-%m-%d %H:%M')
-                        except Exception:
-                            pub_formatted = pub_date_str
+                        title = news_item.get("title", "")
+                        if not title:
+                            continue
+                        link = news_item.get("link", "#")
+                        publisher = news_item.get("publisher", "Unknown")
+                        pub_date_str = news_item.get("pub_date", "")
+                        src_type = news_item.get("source_type", "yfinance")
+
+                        # Format date — handles ISO-8601 and RFC-2822
+                        pub_formatted = pub_date_str
+                        for fmt in (
+                            lambda s: datetime.fromisoformat(s.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M"),
+                            lambda s: datetime.strptime(s, "%a, %d %b %Y %H:%M:%S %Z").strftime("%Y-%m-%d %H:%M"),
+                            lambda s: datetime.strptime(s[:25], "%a, %d %b %Y %H:%M:%S").strftime("%Y-%m-%d"),
+                        ):
+                            try:
+                                pub_formatted = fmt(pub_date_str)
+                                break
+                            except Exception:
+                                continue
+
+                        icon, badge_bg, badge_fg = _SOURCE_BADGE.get(src_type, ("📰", "#2A2A2A", "#C5A059"))
+                        st.markdown(
+                            f'<span style="background:{badge_bg};color:{badge_fg};'
+                            f'font-size:10px;padding:2px 7px;border-radius:4px;'
+                            f'letter-spacing:0.06em;text-transform:uppercase;">'
+                            f'{icon} {publisher}</span>',
+                            unsafe_allow_html=True,
+                        )
                         st.markdown(f"**[{title}]({link})**")
-                        st.caption(f"Source: {publisher} | {pub_formatted}")
+                        st.caption(pub_formatted)
                         st.divider()
                 else:
                     st.caption("No recent news available.")
@@ -874,74 +1334,180 @@ with tab_analysis:
             # 3. ACTION
             notes = st.text_area("Investment Thesis", height=100)
             if st.button(f"Add {ticker_input} to Watchlist"):
-                new_row = pd.DataFrame([{"Ticker": ticker_input, "Price_At_Add": data['Price'], "Added_By": user, "Notes": notes, "Status": "Watching"}])
                 try:
-                    curr = conn.read(worksheet="Watchlist")
-                    conn.update(worksheet="Watchlist", data=pd.concat([curr, new_row], ignore_index=True))
+                    curr = get_watchlist_df()
+                    updated = add_row(
+                        curr,
+                        ticker=ticker_input,
+                        price_at_add=data["Price"],
+                        partner_key=partner_key,
+                        added_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                        notes=notes,
+                        status="Watching",
+                    )
+                    update_watchlist_df(updated)
+                    st.cache_data.clear()
                     st.success("Synced!")
                 except Exception as e:
                     st.error(f"Error syncing to Sheets: {e}")
 
 # --- TAB 3: PORTFOLIO OPTIMIZER ---
-with tab_optimizer:
-    st.subheader("Portfolio Optimizer")
-    st.caption("Compute optimal allocations using Mean-Variance Optimization (pypfopt)")
+if active_workspace == "Allocation Dashboard":
+    st.subheader("Allocation Decision Dashboard")
+    st.caption("Risk-aware allocation across tech, healthcare, infrastructure, broad ETFs, and bonds.")
 
-    # Pre-populate tickers from Portfolio sheet if available
-    default_tickers = ""
+    raw_portfolio = None
+    rich_portfolio = None
+    current_weights = {}
+    total_equity_for_rebalance = 0.0
     try:
-        portfolio_df = conn.read(worksheet="Portfolio", ttl=5)
-        if portfolio_df is not None and not portfolio_df.empty and 'Ticker' in portfolio_df.columns:
-            default_tickers = "\n".join(portfolio_df['Ticker'].dropna().unique().tolist())
+        raw_portfolio = get_portfolio_df()
+        if raw_portfolio is not None and not raw_portfolio.empty:
+            rich_portfolio, total_equity_for_rebalance, _ = get_portfolio_performance(raw_portfolio)
+            current_weights = current_portfolio_weights(rich_portfolio)
     except Exception:
         pass
 
     opt_col1, opt_col2 = st.columns([1, 2])
     with opt_col1:
-        tickers_text = st.text_area("Tickers (one per line)", value=default_tickers, height=200)
-        strategy = st.radio("Strategy", ["Max Sharpe", "Min Volatility", "Target Return"])
-        target_ret = None
-        if strategy == "Target Return":
-            target_ret = st.slider("Target Annual Return", 0.0, 0.50, 0.10, 0.01, format="%.0f%%")
-        run_opt = st.button("Optimize")
+        profile_key = st.radio(
+            "Mandate",
+            list(PROFILES.keys()),
+            format_func=lambda k: PROFILES[k].name,
+        )
+        include_current = st.checkbox("Include current portfolio tickers", value=True)
+        extra_default = "\n".join(current_weights.keys()) if include_current else ""
+        extra_tickers_text = st.text_area(
+            "Additional tickers",
+            value=extra_default,
+            height=140,
+            help="Optional single-name ideas to include alongside the sleeve ETF universe.",
+        )
+        selected_sleeves = st.multiselect(
+            "Allocation sleeves",
+            options=list(SLEEVE_UNIVERSE.keys()),
+            default=list(SLEEVE_UNIVERSE.keys()),
+            format_func=lambda k: SLEEVE_UNIVERSE[k]["label"],
+        )
+        run_opt = st.button("Run Allocation Model")
 
     with opt_col2:
         if run_opt:
-            ticker_list = [t.strip().upper() for t in tickers_text.strip().splitlines() if t.strip()]
-            if len(ticker_list) < 2:
-                st.warning("Enter at least 2 tickers.")
-            else:
-                with st.spinner("Optimizing..."):
-                    try:
-                        weights, perf = optimize_portfolio(ticker_list, strategy, target_ret)
-                        if weights is None:
-                            st.error("Could not download price data for the given tickers.")
-                        else:
-                            exp_ret, vol, sharpe = perf
+            try:
+                extra_tickers = [
+                    validate_ticker(t)
+                    for t in extra_tickers_text.replace(",", "\n").splitlines()
+                    if t.strip()
+                ]
+                sleeve_tickers = []
+                for sleeve_key in selected_sleeves:
+                    sleeve_tickers.extend(SLEEVE_UNIVERSE[sleeve_key]["tickers"])
+                ticker_list = sorted(set(universe_tickers(extra_tickers)) & set(sleeve_tickers + extra_tickers))
+                if len(ticker_list) < 2:
+                    st.warning("Select at least two investable tickers.")
+                    st.stop()
 
-                            # ANLS-03: Branded KPI cards for portfolio stats
-                            m1, m2, m3 = st.columns(3)
-                            with m1:
-                                st.markdown(_kpi_card("Expected Return", f"{exp_ret:.2%}"), unsafe_allow_html=True)
-                            with m2:
-                                st.markdown(_kpi_card("Volatility", f"{vol:.2%}"), unsafe_allow_html=True)
-                            with m3:
-                                st.markdown(_kpi_card("Sharpe Ratio", f"{sharpe:.2f}"), unsafe_allow_html=True)
+                with st.spinner("Building allocation model..."):
+                    prices = get_allocation_prices(tuple(ticker_list))
+                    if prices.shape[1] < 2:
+                        st.error("Could not download enough price history for the selected universe.")
+                        st.stop()
+                    result = optimize_allocation(prices, profile_key=profile_key)
 
-                            # ANLS-03: Branded horizontal bar chart
-                            alloc = {k: v for k, v in weights.items() if v > 0}
-                            alloc_df = pd.DataFrame({"Ticker": list(alloc.keys()), "Weight": list(alloc.values())})
-                            alloc_df = alloc_df.sort_values("Weight", ascending=True)
+                profile = result["profile"]
+                weights = {k: v for k, v in result["weights"].items() if v > 0.001}
+                score = result["score"]
+                asset_mix = result["asset_class_breakdown"]
 
-                            fig = px.bar(alloc_df, x="Weight", y="Ticker", orientation="h",
-                                         text=alloc_df["Weight"].apply(lambda w: f"{w:.1%}"),
-                                         color_discrete_sequence=["#C5A059"])
-                            opt_layout = {**PLOTLY_DARK_LAYOUT, "height": max(280, len(alloc_df) * 40), "margin": dict(t=10, b=10, l=10, r=10)}
-                            fig.update_layout(**opt_layout, xaxis_tickformat=".0%")
-                            fig.update_traces(textfont_color="#0A0A0A", textfont_size=11)
-                            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+                m1, m2, m3, m4 = st.columns(4)
+                with m1:
+                    st.markdown(_kpi_card("Expected Return", f"{result['expected_return']:.2%}"), unsafe_allow_html=True)
+                with m2:
+                    st.markdown(_kpi_card("Volatility", f"{result['volatility']:.2%}"), unsafe_allow_html=True)
+                with m3:
+                    st.markdown(_kpi_card("Sharpe", f"{result['sharpe']:.2f}", delta=score["label"]), unsafe_allow_html=True)
+                with m4:
+                    st.markdown(_kpi_card("Bond Sleeve", f"{asset_mix.get('bond', 0):.1%}"), unsafe_allow_html=True)
 
-                            # ANLS-03: Styled allocation breakdown rows (replaces raw dataframe)
-                            st.markdown(_alloc_breakdown(alloc), unsafe_allow_html=True)
-                    except Exception as e:
-                        st.error(f"Optimization failed: {e}")
+                st.caption(profile.description)
+
+                alloc_df = pd.DataFrame({
+                    "Ticker": list(weights.keys()),
+                    "Weight": list(weights.values()),
+                }).sort_values("Weight", ascending=True)
+                fig = px.bar(
+                    alloc_df,
+                    x="Weight",
+                    y="Ticker",
+                    orientation="h",
+                    text=alloc_df["Weight"].apply(lambda w: f"{w:.1%}"),
+                    color_discrete_sequence=["#C5A059"],
+                )
+                opt_layout = {
+                    **PLOTLY_DARK_LAYOUT,
+                    "height": max(300, len(alloc_df) * 34),
+                    "margin": dict(t=10, b=10, l=10, r=10),
+                }
+                fig.update_layout(**opt_layout, xaxis_tickformat=".0%")
+                fig.update_traces(textfont_color="#0A0A0A", textfont_size=11)
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+                mix_df = pd.DataFrame({
+                    "Asset Class": [k.title() for k in asset_mix.keys()],
+                    "Weight": list(asset_mix.values()),
+                })
+                sleeve_df = pd.DataFrame({
+                    "Sleeve": [
+                        SLEEVE_UNIVERSE.get(k, {}).get("label", k)
+                        for k in result["sleeve_breakdown"].keys()
+                    ],
+                    "Weight": list(result["sleeve_breakdown"].values()),
+                })
+                mix_col, sleeve_col = st.columns(2)
+                with mix_col:
+                    st.write("**Asset Mix**")
+                    st.dataframe(
+                        mix_df.style.format({"Weight": "{:.1%}"}),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                with sleeve_col:
+                    st.write("**Sleeve Exposure**")
+                    st.dataframe(
+                        sleeve_df.style.format({"Weight": "{:.1%}"}),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                if current_weights and total_equity_for_rebalance > 0:
+                    st.write("**Rebalance Delta vs Current Portfolio**")
+                    rebalance_df = rebalance_recommendation(
+                        current_weights,
+                        weights,
+                        total_equity_for_rebalance,
+                    )
+                    st.dataframe(
+                        rebalance_df.style.format({
+                            "Current Weight": "{:.1%}",
+                            "Target Weight": "{:.1%}",
+                            "Delta Weight": "{:+.1%}",
+                            "Dollar Amount": "${:+,.0f}",
+                        }),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.info("Add portfolio holdings to Google Sheets to see buy/sell rebalance deltas.")
+
+                st.write("**News Cross-Check**")
+                news_df = allocation_news_summary(
+                    sorted(weights, key=weights.get, reverse=True),
+                    max_tickers=8,
+                )
+                st.dataframe(
+                    news_df.style.format({"Score": "{:+.2f}"}),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            except Exception as e:
+                st.error(f"Allocation model failed: {e}")
