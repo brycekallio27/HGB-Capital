@@ -32,3 +32,9 @@ ui-ux-pro-max-skill/
 landing/.env.local
 landing/node_modules/
 landing/.next/
+
+# Internal working notes (not part of the shipped app)
+CLAUDE.md
+TASKS.md
+PARTNER_NOTES.md
+.planning/
